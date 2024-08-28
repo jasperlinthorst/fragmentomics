@@ -8,10 +8,7 @@ def _5pends(args):
     pass
 
 def cleavesitemotifs(args):
-    cramfilename=args.samfile
-    #reference="hg38flat.fa"
-    
-    cram=pysam.AlignmentFile(cramfilename,reference_filename=args.reference)
+    cram=pysam.AlignmentFile(args.samfile,reference_filename=args.reference)
     fasta=pysam.FastaFile(args.reference)
     
     k=args.k
@@ -65,21 +62,70 @@ def cleavesitemotifs(args):
     else:
         sys.stdout.write("\t".join(map(str,d.values())) + "\n") 
 
-def bincounts(args):
-    
-    #check if fai index for reference is available
-    
+def bincounts(args):    
+    cram=pysam.AlignmentFile(args.samfile,reference_filename=args.reference)
     fasta=pysam.FastaFile(args.reference)
-    
+
+    bins={}    
+    refl={}
     for ref in fasta.references:
-        print(ref,fasta.get_reference_length(ref))
+        refl[ref]=fasta.get_reference_length(ref)
+        bins[ref]=np.zeros(int(refl[ref]/args.binsize)+1)
     
-    #read reference index file
+    for read in cram:
+        if read.mapping_quality>=args.mapqual:
+            if not read.is_unmapped and not read.is_duplicate:
+                bins[read.reference_name][int(read.pos/args.binsize)]+=1
     
+    if args.header:
+        h=[]
+        for ref in bins:
+            h+=[ref+'_'+str(x) for x in range(len(bins[ref]))]
     
-    #sys.stdout.write("\t".join(d.values()))
+    v=[]
+    for ref in bins:
+        v+=list(bins[ref])
     
+    if args.header:
+        sys.stdout.write("\t".join(h)+"\n")    
     
+    if args.norm:
+        sys.stdout.write("\t".join(map(str,np.array(v)/v.sum()))+"\n")
+    else:
+        sys.stdout.write("\t".join(map(str,v))+"\n")
+
+def fszd(args):
+    
+    cram=pysam.AlignmentFile(args.samfile,reference_filename=args.reference)
+    
+    fszd={}
+    
+    for fsz in range(args.lower,args.upper):
+        fszd[fsz]=0
+    
+    i=0
+    for read in cram:
+        if read.mapping_quality>=args.mapqual and not read.is_unmapped and not read.is_duplicate and read.is_read2:
+            if read.template_length!=None:
+                if abs(read.template_length)>args.lower and abs(read.template_length)<args.upper:
+                    if abs(read.template_length)>=args.lower and abs(read.template_length)<args.upper:
+                        fszd[abs(read.template_length)]+=1
+                    i+=1
+        
+        if args.maxo!=None:
+            if i==args.maxo:
+                break
+    
+    if args.header:
+        sys.stdout.write("\t".join(map(str,range(args.lower, args.upper))+"\n"))
+    
+    v=np.array([fszd[sz] for sz in range(args.lower,args.upper,1)])
+    
+    if args.norm:
+        sys.stdout.write("\t".join(map(str,v/v.sum()))+"\n")
+    else:
+        sys.stdout.write("\t".join(map(str,v))+"\n")
+
 def main():
     parser = argparse.ArgumentParser(prog="cfstats", usage="cfstats -h", description="Gather cfDNA statistics", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     
@@ -97,20 +143,27 @@ def main():
     subparsers = parser.add_subparsers()
     
     parser_csm = subparsers.add_parser('csm',prog="cfstats csm", description="Extract k-length cleave-site motifs using the reference sequence at the 5' start/end of cfDNA fragments.", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
-    parser_csm.add_argument('samfile', help='')
+    parser_csm.add_argument('samfile', help='sam/bam/cram file')
     parser_csm.add_argument("-k", dest="k", default=4, type=int, help="Length of the cleave-site motifs.")
     parser_csm.set_defaults(func=cleavesitemotifs)
     
     parser_5pends = subparsers.add_parser('5pends',prog="cfstats 5pends", description="", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
-    parser_5pends.add_argument('samfile', nargs=1, help='')
+    parser_5pends.add_argument('samfile', nargs=1, help='sam/bam/cram file')
     parser_5pends.add_argument("-k", dest="k", default=4, type=int, help="Length of the 5' ends patterns.")
     parser_5pends.set_defaults(func=_5pends)
     
     parser_bincounts = subparsers.add_parser('bincounts',prog="cfstats bincounts", description="", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
-    parser_bincounts.add_argument('samfile', nargs=1, help='')
-    parser_bincounts.add_argument("-b", "--binsize", dest="binsize", default=1000000, help="Size of the bins.")
+    parser_bincounts.add_argument('samfile', help='sam/bam/cram file')
+    parser_bincounts.add_argument("-b", "--binsize", dest="binsize", type=int, default=1000000, help="Size of the bins.")
     parser_bincounts.set_defaults(func=bincounts)
+
+    parser_fszd = subparsers.add_parser('fszd',prog="cfstats fszd", description="Extract fragment size distribution (only for paired-end data)", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
+    parser_fszd.add_argument('samfile', help='sam/bam/cram file')
+    parser_fszd.add_argument('-l','--lower', default=60, help='Lower limit for fragments to report')
+    parser_fszd.add_argument('-u','--upper', default=600, help='Upper limit for fragments to report')
     
+    parser_fszd.set_defaults(func=fszd)
+
     args = parser.parse_args()
     
     if hasattr(args, 'func'):
