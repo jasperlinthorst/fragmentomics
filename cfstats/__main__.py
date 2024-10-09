@@ -57,7 +57,12 @@ def cleavesitemotifs(args):
                 break
     
     if args.header:
+        if args.name:
+            sys.stdout.write("filename\t")
         sys.stdout.write("\t".join(map(str,list(d.keys()))) + "\n")
+    
+    if args.name:
+        sys.stdout.write(args.samfile+"\t")
     
     if args.norm:
         c=np.array(list(d.values()))
@@ -95,8 +100,14 @@ def bincounts(args):
         v+=list(bins[ref])
     
     if args.header:
+        if args.name:
+            sys.stdout.write("filename\t")
+
         sys.stdout.write("\t".join(h)+"\n")    
-    
+
+    if args.name:
+        sys.stdout.write(args.samfile+"\t")
+
     if args.norm:
         sys.stdout.write("\t".join(map(str,np.array(v)/v.sum()))+"\n")
     else:
@@ -110,25 +121,37 @@ def fszd(args):
     
     for fsz in range(args.lower,args.upper):
         fszd[fsz]=0
-    
+        
     i=0
     for read in cram:
-        if read.mapping_quality>=args.mapqual and not read.is_unmapped and not read.is_duplicate and read.is_read2:
-            if read.template_length!=None:
-                if abs(read.template_length)>args.lower and abs(read.template_length)<args.upper:
-                    if abs(read.template_length)>=args.lower and abs(read.template_length)<args.upper:
-                        fszd[abs(read.template_length)]+=1
-                    i+=1
+        if read.mapping_quality>=args.mapqual and not read.is_unmapped and not read.is_duplicate:
+            
+            if args.insertissize:
+                if read.template_length!=None and read.is_read2:
+                    if abs(read.template_length)>args.lower and abs(read.template_length)<args.upper:
+                        if abs(read.template_length)>=args.lower and abs(read.template_length)<args.upper:
+                            fszd[abs(read.template_length)]+=1
+                        i+=1
+            else:
+                if read.query_length>=args.lower and read.query_length<args.upper:
+                    fszd[read.query_length]+=1
+                i+=1
+        
         if args.maxo!=None:
             if i==args.maxo:
                 break
     
     if args.header:
-        sys.stdout.write("\t".join(map(str,range(args.lower, args.upper))+"\n"))
+        if args.name:
+            sys.stdout.write("filename\t")        
+        sys.stdout.write("\t".join(map(str,range(args.lower, args.upper)))+"\n")
     
-    v=np.array([fszd[sz] for sz in range(args.lower,args.upper,1)])
+    v=np.array([fszd[sz]+1 for sz in range(args.lower,args.upper,1)])
     
-    if args.norm:
+    if args.name:
+        sys.stdout.write(args.samfile+"\t")
+    
+    if args.norm:    
         sys.stdout.write("\t".join(map(str,v/v.sum()))+"\n")
     else:
         sys.stdout.write("\t".join(map(str,v))+"\n")
@@ -152,14 +175,21 @@ def delfi(args):
     
     for read in cram:
         if read.mapping_quality>=args.mapqual:
-            if not read.is_unmapped and not read.is_duplicate and read.is_read2:
-                if (abs(read.template_length)>args.shortlow and abs(read.template_length)<args.shortup):
-                    bins_short[read.reference_name][int(read.pos/args.binsize)]+=1
-                elif (abs(read.template_length)>args.longlow and abs(read.template_length)<args.longup):
-                    bins_long[read.reference_name][int(read.pos/args.binsize)]+=1
+            if args.insertissize:
+                if not read.is_unmapped and not read.is_duplicate and read.is_read2:
+                    if (abs(read.template_length)>args.shortlow and abs(read.template_length)<args.shortup):
+                        bins_short[read.reference_name][int(read.pos/args.binsize)]+=1
+                    elif (abs(read.template_length)>args.longlow and abs(read.template_length)<args.longup):
+                        bins_long[read.reference_name][int(read.pos/args.binsize)]+=1
+            else:
+                if not read.is_unmapped and not read.is_duplicate:
+                    if (abs(read.query_length)>args.shortlow and abs(read.query_length)<args.shortup):
+                        bins_short[read.reference_name][int(read.pos/args.binsize)]+=1
+                    elif (abs(read.query_length)>args.longlow and abs(read.query_length)<args.longup):
+                        bins_long[read.reference_name][int(read.pos/args.binsize)]+=1
     
     if args.header:
-        h=[]
+        h=["filename" if args.name else None]
         for ref in bins_short:
             h+=[ref+'_delfi_'+str(x) for x in range(len(bins_short[ref]))]
     
@@ -167,9 +197,14 @@ def delfi(args):
     for ref in bins_short:
         vshort+=list(bins_short[ref])
         vlong+=list(bins_long[ref])
-        
+    
     if args.header:
+        if args.name:
+            sys.stdout.write("filename\t")
         sys.stdout.write("\t".join(h)+"\n")    
+    
+    if args.name:
+        sys.stdout.write(args.samfile+"\t")
     
     sys.stdout.write("\t".join( map(str,(np.array(vshort)+1)/(np.array(vlong)+1) ) ) +"\n")
 
@@ -185,6 +220,7 @@ def main():
     global_parser.add_argument("--no-norm", dest="norm", action="store_false", default=True, help="Don't normalize: report absolute counts instead of frequencies")
     global_parser.add_argument("-o", dest="maxo", default=None, type=int, help="Limit stats to maxo observations.")
     global_parser.add_argument("--header", dest="header", action="store_true", default=False, help="Write header for names of features")
+    global_parser.add_argument("--name", dest="name", action="store_true", default=False, help="Prefix tab-separated values with the name of the file")
     global_parser.add_argument("-r", dest="reference", default=None, type=str, help="Reference file for: reference depended features cleave-site motifs/binned counts/cram decoding.")
     
     subparsers = parser.add_subparsers()
@@ -206,8 +242,9 @@ def main():
 
     parser_fszd = subparsers.add_parser('fszd',prog="cfstats fszd", description="Extract fragment size distribution (only for paired-end data)", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_fszd.add_argument('samfile', help='sam/bam/cram file')
-    parser_fszd.add_argument('-l','--lower', default=60, help='Lower limit for fragments to report')
-    parser_fszd.add_argument('-u','--upper', default=600, help='Upper limit for fragments to report')
+    parser_fszd.add_argument('-l','--lower', default=60, type=int, help='Lower limit for fragments to report')
+    parser_fszd.add_argument('-u','--upper', default=600, type=int, help='Upper limit for fragments to report')
+    parser_fszd.add_argument("--noinsert", dest="insertissize", action="store_false", default=True, help="In case of long-read/unpaired sequencing infer fragmentsize from sequence instead of insert.")
     parser_fszd.set_defaults(func=fszd)
         
     parser_delfi = subparsers.add_parser('delfi',prog="cfstats delfi", description="Extract DELFI-like measure for bins of a predefined size (only for paired-end data)", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
@@ -217,6 +254,7 @@ def main():
     parser_delfi.add_argument('--short-upper', dest='shortup', default=150, help='Definition of short fragments')
     parser_delfi.add_argument('--long-lower', dest='longlow', default=150, help='Definition of long fragments')
     parser_delfi.add_argument('--long-upper', dest='longup', default=200, help='Definition of short fragments')
+    parser_delfi.add_argument("--noinsert", dest="insertissize", action="store_false", default=True, help="In case of long-read/unpaired sequencing infer fragmentsize from sequence instead of insert.")
     parser_delfi.set_defaults(func=delfi)
 
     args = parser.parse_args()
