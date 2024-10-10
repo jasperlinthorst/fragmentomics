@@ -84,11 +84,15 @@ def _5pends(args):
         if args.name:
             sys.stdout.write(args.samfile[0]+"\t")
         
-        if args.norm:
+        if args.norm=='freq':
             c=np.array(list(d.values()))
             f=c/c.sum()
             sys.stdout.write("\t".join(map(str,f)) + "\n")
-        else:
+        elif args.norm=='rpx':
+            c=np.array(list(d.values()))
+            f=(c/(c.sum()/args.x)).astype(int)
+            sys.stdout.write("\t".join(map(str,f)) + "\n")
+        else: #counts
             sys.stdout.write("\t".join(map(str,d.values())) + "\n")
 
 def cleavesitemotifs(args):
@@ -148,9 +152,13 @@ def cleavesitemotifs(args):
     if args.name:
         sys.stdout.write(args.samfile+"\t")
     
-    if args.norm:
+    if args.norm=='freq':
         c=np.array(list(d.values()))
         f=c/c.sum()
+        sys.stdout.write("\t".join(map(str,f)) + "\n")
+    elif args.norm=='rpx':
+        c=np.array(list(d.values()))
+        f=(c/(c.sum()/args.x)).astype(int)
         sys.stdout.write("\t".join(map(str,f)) + "\n")
     else:
         sys.stdout.write("\t".join(map(str,d.values())) + "\n") 
@@ -192,8 +200,10 @@ def bincounts(args):
     if args.name:
         sys.stdout.write(args.samfile+"\t")
 
-    if args.norm:
+    if args.norm=='freq':
         sys.stdout.write("\t".join(map(str,np.array(v)/v.sum()))+"\n")
+    elif args.norm=='rpx':
+        sys.stdout.write("\t".join(map(str,(np.array(v)/(v.sum()/args.x))).astype(int))+"\n")
     else:
         sys.stdout.write("\t".join(map(str,v))+"\n")
 
@@ -209,12 +219,10 @@ def fszd(args):
     i=0
     for read in cram:
         if read.mapping_quality>=args.mapqual and not read.is_unmapped and not read.is_duplicate:
-            
             if args.insertissize:
                 if read.template_length!=None and read.is_read2:
-                    if abs(read.template_length)>args.lower and abs(read.template_length)<args.upper:
-                        if abs(read.template_length)>=args.lower and abs(read.template_length)<args.upper:
-                            fszd[abs(read.template_length)]+=1
+                    if abs(read.template_length)>=args.lower and abs(read.template_length)<args.upper:
+                        fszd[abs(read.template_length)]+=1
                         i+=1
             else:
                 if read.query_length>=args.lower and read.query_length<args.upper:
@@ -230,13 +238,15 @@ def fszd(args):
             sys.stdout.write("filename\t")        
         sys.stdout.write("\t".join(map(str,range(args.lower, args.upper)))+"\n")
     
-    v=np.array([fszd[sz]+1 for sz in range(args.lower,args.upper,1)])
+    v=np.array([fszd[sz] for sz in range(args.lower,args.upper,1)])
     
     if args.name:
         sys.stdout.write(args.samfile+"\t")
     
-    if args.norm:    
+    if args.norm=='freq':    
         sys.stdout.write("\t".join(map(str,v/v.sum()))+"\n")
+    elif args.norm=='rpx':
+        sys.stdout.write("\t".join(map(str,(v/(v.sum()/args.x)).astype(int)))+"\n")
     else:
         sys.stdout.write("\t".join(map(str,v))+"\n")
 
@@ -301,7 +311,9 @@ def main():
     global_parser.add_argument("-f", dest="inclflag", default=0, type=int, help="Sam file filter flag: only include reads that conform to this flag (like samtools -f option)")
     global_parser.add_argument("-F", dest="exclflag", default=0, type=int, help="Sam file filter flag: exclude reads that conform to this flag (like samtools -F option)")
     global_parser.add_argument("-q", dest="mapqual", default=60, type=int, help="Minimal mapping quality of reads to be considered (like samtools -q option)")
-    global_parser.add_argument("--no-norm", dest="norm", action="store_false", default=True, help="Don't normalize: report absolute counts instead of frequencies")
+    global_parser.add_argument("-x", dest="xnorm", default=1000000, type=int, help="Normalisation unit, see norm")
+    global_parser.add_argument("--norm", dest="norm", choices=['counts','freq','rpx'], default='counts', help="Normalize: report counts, frequencies or reads per X reads (default x=1000000, set X with -x option).")
+
     global_parser.add_argument("-o", dest="maxo", default=None, type=int, help="Limit stats to maxo observations.")
     global_parser.add_argument("--header", dest="header", action="store_true", default=False, help="Write header for names of features")
     global_parser.add_argument("--name", dest="name", action="store_true", default=False, help="Prefix tab-separated values with the name of the file")
