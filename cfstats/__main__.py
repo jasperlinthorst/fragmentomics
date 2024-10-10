@@ -1,11 +1,95 @@
+from logging import log
 import pysam
 import numpy as np
 import pandas as pd
 import argparse
 import sys
 
+#Collapse nucleotide sequence to Purine/Pyrimidine sequence
+def nuc2purpyr(s):
+    n2p={'A':'R','G':'R','C':'Y','T':'Y'} #R=purine / Y=Pyrimidine
+    return "".join([n2p[c] for c in s])
+
 def _5pends(args):
-    pass
+        
+        if args.reference==None:
+            parser.error("Reference file is required.")
+    
+        cram=pysam.AlignmentFile(args.samfile[0],reference_filename=args.reference)
+        fasta=pysam.FastaFile(args.reference)
+        
+        k=args.k
+        
+        revcomptable = str.maketrans("acgtACGT","tgcaTGCA")
+        # n=int(wildcards.samplen) if wildcards.samplen!="ALL" else None
+        
+        kmers=[]
+        d={}
+        for i in range(4**k):
+            s=""
+            for j in range(k):
+                s+="ACGT"[int(i/(4**(k-j-1)))%4]
+        
+            rcs=s.translate(revcomptable)[::-1]
+            
+            if args.uselexsmallest:
+                if s <= rcs:
+                    kmers.append(s)
+                    d[s]=0
+            else:
+                kmers.append(s)
+                d[s]=0
+        
+        i=0
+        for read in cram:
+            
+            if read.mapping_quality>=args.mapqual: #and read.flag(args.incflag)
+
+                if not read.is_unmapped and not read.is_duplicate:
+
+                    if args.useref:
+                        if read.is_reverse:
+                            s=fasta.fetch(read.reference_name,int(read.reference_end-k),int(read.reference_end)).translate(revcomptable)[::-1].upper()
+                        else:
+                            s=fasta.fetch(read.reference_name,int(read.reference_start),int(read.reference_start+k)).upper()
+                    else:
+                        s=read.query_sequence[:k].upper() if not read.is_reverse else read.query_sequence[-k:].translate(revcomptable)[::-1].upper()
+
+                    # print("ref",fasta.fetch(read.reference_name,int(read.reference_start),int(read.reference_end)).upper())
+                    # print("qry",read.query_sequence)
+                    # print("reverse",read.is_reverse)
+
+                    if 'N' not in s:
+                        try:
+                            if args.uselexsmallest: #only count lexigraphically smallest kmer
+                                rcs=s.translate(revcomptable)[::-1]
+                                d[s if s<rcs else rcs]+=1
+                            else:
+                                d[s]+=1
+                            
+                            i+=1
+                        except KeyError: #skip when reads have other characters than ACGT
+                            print("Err",s)
+                            pass
+            
+            if args.maxo!=None:
+                if i==args.maxo:
+                    break
+        
+        if args.header:
+            if args.name:
+                sys.stdout.write("filename\t")
+            sys.stdout.write("\t".join(map(str,list(d.keys()))) + "\n")
+        
+        if args.name:
+            sys.stdout.write(args.samfile[0]+"\t")
+        
+        if args.norm:
+            c=np.array(list(d.values()))
+            f=c/c.sum()
+            sys.stdout.write("\t".join(map(str,f)) + "\n")
+        else:
+            sys.stdout.write("\t".join(map(str,d.values())) + "\n")
 
 def cleavesitemotifs(args):
     
@@ -233,6 +317,8 @@ def main():
     parser_5pends = subparsers.add_parser('5pends',prog="cfstats 5pends", description="", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_5pends.add_argument('samfile', nargs=1, help='sam/bam/cram file')
     parser_5pends.add_argument("-k", dest="k", default=4, type=int, help="Length of the 5' ends patterns.")
+    parser_5pends.add_argument("--useref", action="store_true", dest="useref", default=False, help="Use reference sequence instead of read sequence.")
+    parser_5pends.add_argument("--uselexsmallest", action="store_true", dest="uselexsmallest", default=False, help="Only count lexigraphically smallest kmer.")
     parser_5pends.set_defaults(func=_5pends)
     
     parser_bincounts = subparsers.add_parser('bincounts',prog="cfstats bincounts", description="", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
