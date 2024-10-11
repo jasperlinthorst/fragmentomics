@@ -1,0 +1,7 @@
+build/lib/cfstats/__main__.py
+build/lib/cfstats/__init__.py
+cfstats.egg-info/dependency_links.txt
+cfstats.egg-info/entry_points.txt
+cfstats.egg-info/PKG-INFO
+cfstats.egg-info/SOURCES.txt
+cfstats.egg-info/top_level.txt

@@ -5,6 +5,12 @@ import pandas as pd
 import argparse
 import sys
 
+base64_pca=""
+base64_clfb_pca=""
+base64_clfgt_pca="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"
+
+
+
 #Collapse nucleotide sequence to Purine/Pyrimidine sequence
 def nuc2purpyr(s):
     n2p={'A':'R','G':'R','C':'Y','T':'Y'} #R=purine / Y=Pyrimidine
@@ -12,8 +18,8 @@ def nuc2purpyr(s):
 
 def _5pends(args):
         
-        if args.reference==None:
-            parser.error("Reference file is required.")
+        #if args.reference==None:
+        #    parser.error("Reference file is required.")
     
         cram=pysam.AlignmentFile(args.samfile[0],reference_filename=args.reference)
         fasta=pysam.FastaFile(args.reference)
@@ -95,7 +101,7 @@ def _5pends(args):
         else: #counts
             sys.stdout.write("\t".join(map(str,d.values())) + "\n")
 
-def cleavesitemotifs(args):
+def cleavesitemotifs(args, cmdline=True):
     
     if args.reference==None:
         parser.error("Reference file is required.")
@@ -144,26 +150,29 @@ def cleavesitemotifs(args):
             if i==args.maxo:
                 break
     
+    c=np.array(list(d.values()))
+    if args.norm=='freq':
+        f=c/c.sum()
+        
+    elif args.norm=='rpx':
+        f=(c/(c.sum()/args.x)).astype(int)
+    else:
+        f=c
+
+    if not cmdline: #return values instead of printing
+        return f
+
     if args.header:
         if args.name:
             sys.stdout.write("filename\t")
         sys.stdout.write("\t".join(map(str,list(d.keys()))) + "\n")
-    
+
     if args.name:
         sys.stdout.write(args.samfile+"\t")
-    
-    if args.norm=='freq':
-        c=np.array(list(d.values()))
-        f=c/c.sum()
-        sys.stdout.write("\t".join(map(str,f)) + "\n")
-    elif args.norm=='rpx':
-        c=np.array(list(d.values()))
-        f=(c/(c.sum()/args.x)).astype(int)
-        sys.stdout.write("\t".join(map(str,f)) + "\n")
-    else:
-        sys.stdout.write("\t".join(map(str,d.values())) + "\n") 
 
-def bincounts(args):    
+    sys.stdout.write("\t".join(map(str,f)) + "\n")
+
+def bincounts(args, cmdline=True):    
 
     if args.reference==None:
         parser.error("Reference file is required.")
@@ -207,7 +216,7 @@ def bincounts(args):
     else:
         sys.stdout.write("\t".join(map(str,v))+"\n")
 
-def fszd(args):
+def fszd(args, cmdline=True):
     
     cram=pysam.AlignmentFile(args.samfile,reference_filename=args.reference)
     
@@ -240,6 +249,9 @@ def fszd(args):
     
     v=np.array([fszd[sz] for sz in range(args.lower,args.upper,1)])
     
+    if not cmdline:
+        return v
+
     if args.name:
         sys.stdout.write(args.samfile+"\t")
     
@@ -251,7 +263,7 @@ def fszd(args):
         sys.stdout.write("\t".join(map(str,v))+"\n")
 
 
-def delfi(args):
+def delfi(args, cmdline=True):
     cram=pysam.AlignmentFile(args.samfile,reference_filename=args.reference)
     
     if args.reference==None:
@@ -302,6 +314,23 @@ def delfi(args):
     
     sys.stdout.write("\t".join( map(str,(np.array(vshort)+1)/(np.array(vlong)+1) ) ) +"\n")
 
+import sklearn
+import pickle
+import base64
+
+def R206C(args):
+    (pca,clf)=pickle.load(open(args.clf, 'rb'))
+
+    args.k=4
+    args.norm='rpx'
+    args.x=1000000
+    f=np.array(list(cleavesitemotifs(args, cmdline=False))).reshape(1,-1)
+
+    clfgt=clf.predict(pca.transform(f))[0]
+    classp=clf.predict_proba(pca.transform(f))[0]
+
+    sys.stdout.write(f"R206C genotype: {clfgt} (0={classp[0]:.2f},1={classp[1]:.2f},2={classp[2]:.2f})\n")
+
 parser = argparse.ArgumentParser(prog="cfstats", usage="cfstats -h", description="Gather cfDNA statistics", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
 def main():
@@ -311,7 +340,7 @@ def main():
     global_parser.add_argument("-f", dest="inclflag", default=0, type=int, help="Sam file filter flag: only include reads that conform to this flag (like samtools -f option)")
     global_parser.add_argument("-F", dest="exclflag", default=0, type=int, help="Sam file filter flag: exclude reads that conform to this flag (like samtools -F option)")
     global_parser.add_argument("-q", dest="mapqual", default=60, type=int, help="Minimal mapping quality of reads to be considered (like samtools -q option)")
-    global_parser.add_argument("-x", dest="xnorm", default=1000000, type=int, help="Normalisation unit, see norm")
+    global_parser.add_argument("-x", dest="x", default=1000000, type=int, help="Normalisation unit, see norm")
     global_parser.add_argument("--norm", dest="norm", choices=['counts','freq','rpx'], default='counts', help="Normalize: report counts, frequencies or reads per X reads (default x=1000000, set X with -x option).")
 
     global_parser.add_argument("-o", dest="maxo", default=None, type=int, help="Limit stats to maxo observations.")
@@ -354,6 +383,12 @@ def main():
     parser_delfi.add_argument('--long-upper', dest='longup', default=200, help='Definition of short fragments')
     parser_delfi.add_argument("--noinsert", dest="insertissize", action="store_false", default=True, help="In case of long-read/unpaired sequencing infer fragmentsize from sequence instead of insert.")
     parser_delfi.set_defaults(func=delfi)
+
+
+    parser_R206C = subparsers.add_parser('R206C',prog="cfstats R206C", description="Predict R206C genotype using fragmentomics", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
+    parser_R206C.add_argument('samfile', help='sam/bam/cram file')
+    parser_R206C.add_argument('clf', help='classifier file')
+    parser_R206C.set_defaults(func=R206C)
 
     args = parser.parse_args()
     
