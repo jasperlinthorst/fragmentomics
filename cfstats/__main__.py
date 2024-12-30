@@ -5,6 +5,7 @@ import pandas as pd
 import argparse
 import sys
 import os 
+import random
 
 #Collapse nucleotide sequence to Purine/Pyrimidine sequence
 def nuc2purpyr(s):
@@ -75,12 +76,28 @@ def _5pends(args):
                 kmers.append(s)
                 d[s]=0
         
+        if args.maxo!=None: # Obtain total mapped reads from index to estimate sample fraction
+            total_mapped_reads = sum([int(l.split("\t")[2]) for l in pysam.idxstats(cram.filename).split("\n")[:-1]])
+            samplefrac=args.maxo/total_mapped_reads
+
         i=0
         for read in cram:
+
+            if args.reqflag != None:
+                if read.flag & args.inclflag != args.inclflag:
+                    continue
             
+            if args.exclflag != 0:
+                if read.flag & args.exclflag != 0:
+                    continue
+
+            if args.maxo!=None: #restrict to sample approximately maxo reads
+                if random.random() > samplefrac:
+                    continue
+
             if read.mapping_quality>=args.mapqual and len(read.query_sequence)>args.k*2: #and read.flag(args.incflag)
 
-                if not read.is_unmapped and not read.is_duplicate:
+                if not read.is_duplicate:
 
                     if args.useref:
                         if read.is_reverse:
@@ -107,10 +124,6 @@ def _5pends(args):
                         except KeyError: #skip when reads have other characters than ACGT or are not in the dictionary for another reason
                             print("Err",s)
                             pass
-            
-            if args.maxo!=None:
-                if i==args.maxo:
-                    break
         
         if args.header and samfile==args.samfiles[0]:
             if args.name:
@@ -158,28 +171,41 @@ def cleavesitemotifs(args, cmdline=True):
                 kmers.append(s)
                 d[s]=0
         
+        if args.maxo!=None:
+            total_mapped_reads = sum([int(l.split("\t")[2]) for l in pysam.idxstats(cram.filename).split("\n")[:-1]])
+            samplefrac=args.maxo/total_mapped_reads
+
         i=0
-        for read in cram:
+        for read in cram.fetch():
             
-            if read.mapping_quality>=args.mapqual: #and read.flag(args.incflag)
+            if args.reqflag != None:
+                if read.flag & args.inclflag != args.inclflag:
+                    continue
             
-                if not read.is_unmapped and not read.is_duplicate and read.reference_start>int(k/2) and read.reference_end<cram.get_reference_length(read.reference_name)-int(k/2):
-                    if read.is_reverse:
-                        s=fasta.fetch(read.reference_name,int(read.reference_end-k/2),int(read.reference_end+k/2)).upper()
-                    else:
-                        s=fasta.fetch(read.reference_name,int(read.reference_start-k/2),int(read.reference_start+k/2)).upper()
-                    if 'N' not in s:
-                        try:
-                            rcs=s.translate(revcomptable)[::-1]
-                            d[s if s<rcs else rcs]+=1
-                            i+=1
-                        except KeyError: #skip when reads have other characters than ACGT
-                            print("Err",s)
-                            pass
+            if args.exclflag != 0:
+                if read.flag & args.exclflag != 0:
+                    continue
+                        
+            if read.mapping_quality<args.mapqual:
+                continue
             
-            if args.maxo!=None:
-                if i==args.maxo:
-                    break
+            if args.maxo!=None: #restrict to sample approximately maxo reads
+                if random.random() > samplefrac:
+                    continue
+            
+            if read.reference_start>int(k/2) and read.reference_end<cram.get_reference_length(read.reference_name)-int(k/2):
+                if read.is_reverse:
+                    s=fasta.fetch(read.reference_name,int(read.reference_end-k/2),int(read.reference_end+k/2)).upper()
+                else:
+                    s=fasta.fetch(read.reference_name,int(read.reference_start-k/2),int(read.reference_start+k/2)).upper()
+                if 'N' not in s:
+                    try:
+                        rcs=s.translate(revcomptable)[::-1]
+                        d[s if s<rcs else rcs]+=1
+                        i+=1
+                    except KeyError: #skip when reads have other characters than ACGT
+                        print("Err",s)
+                        pass
         
         c=np.array(list(d.values()))
         if args.norm=='freq':
@@ -199,7 +225,7 @@ def cleavesitemotifs(args, cmdline=True):
             sys.stdout.write("\t".join(map(str,list(d.keys()))) + "\n")
 
         if args.name:
-            sys.stdout.write(args.samfile+"\t")
+            sys.stdout.write(samfile+"\t")
 
         sys.stdout.write("\t".join(map(str,f)) + "\n")
 
@@ -218,7 +244,23 @@ def bincounts(args, cmdline=True):
             refl[ref]=fasta.get_reference_length(ref)
             bins[ref]=np.zeros(int(refl[ref]/args.binsize)+1)
         
+        if args.maxo!=None:
+            total_mapped_reads = sum([int(l.split("\t")[2]) for l in pysam.idxstats(cram.filename).split("\n")[:-1]])
+            samplefrac=args.maxo/total_mapped_reads
+
         for read in cram:
+            if args.reqflag != None:
+                if read.flag & args.inclflag != args.inclflag:
+                    continue
+            
+            if args.exclflag != 0:
+                if read.flag & args.exclflag != 0:
+                    continue
+
+            if args.maxo!=None: #restrict to sample approximately maxo reads
+                if random.random() > samplefrac:
+                    continue
+            
             if read.mapping_quality>=args.mapqual:
                 if not read.is_unmapped and not read.is_duplicate:
                     bins[read.reference_name][int(read.pos/args.binsize)]+=1
@@ -257,10 +299,28 @@ def fszd(args, cmdline=True):
         
         for fsz in range(args.lower,args.upper):
             fszd[fsz]=0
-            
+        
+        if args.maxo!=None:
+            # Obtain total reads in CRAM from index
+            #print(pysam.idxstats(cram.filename))
+            total_mapped_reads = sum([int(l.split("\t")[2]) for l in pysam.idxstats(cram.filename).split("\n")[:-1]])
+            samplefrac=args.maxo/total_mapped_reads
+
         i=0
         for read in cram:
-            if read.mapping_quality>=args.mapqual and not read.is_unmapped and not read.is_duplicate:
+            if args.reqflag != None:
+                if read.flag & args.inclflag != args.inclflag:
+                    continue
+            
+            if args.exclflag != 0:
+                if read.flag & args.exclflag != 0:
+                    continue
+                
+            if args.maxo!=None: #restrict to sample approximately maxo reads
+                if random.random() > samplefrac:
+                    continue
+
+            if read.mapping_quality>=args.mapqual and not read.is_duplicate:
                 if args.insertissize:
                     if read.template_length!=None and read.is_read2:
                         if abs(read.template_length)>=args.lower and abs(read.template_length)<args.upper:
@@ -271,16 +331,12 @@ def fszd(args, cmdline=True):
                         fszd[read.query_length]+=1
                     i+=1
             
-            if args.maxo!=None:
-                if i==args.maxo:
-                    break
-                
         v=np.array([fszd[sz] for sz in range(args.lower,args.upper,1)])
         
         if not cmdline:
             return v
 
-        if args.header and samfile==args.samfiles[0] and commandline:
+        if args.header and samfile==args.samfiles[0] and cmdline:
             if args.name:
                 sys.stdout.write("filename\t")        
             sys.stdout.write("\t".join(map(str,range(args.lower, args.upper)))+"\n")
@@ -313,7 +369,20 @@ def delfi(args, cmdline=True):
             bins_short[ref]=np.zeros(int(refl[ref]/args.binsize)+1)
             bins_long[ref]=np.zeros(int(refl[ref]/args.binsize)+1)
         
+        if args.maxo!=None:
+            # Obtain total reads in CRAM from index
+            #print(pysam.idxstats(cram.filename))
+            total_mapped_reads = sum([int(l.split("\t")[2]) for l in pysam.idxstats(cram.filename).split("\n")[:-1]])
+            samplefrac=args.maxo/total_mapped_reads
+        
         for read in cram:
+            if read.is_unmapped:
+                continue
+            
+            if args.maxo!=None: #restrict to sample approximately maxo reads
+                if random.random() > samplefrac:
+                    continue
+            
             if read.mapping_quality>=args.mapqual:
                 if args.insertissize:
                     if not read.is_unmapped and not read.is_duplicate and read.is_read2:
@@ -377,8 +446,8 @@ def main():
     
     global_parser = argparse.ArgumentParser(add_help=False) #parser for arguments that apply to all subcommands
 
-    global_parser.add_argument("-f", dest="inclflag", default=0, type=int, help="Sam file filter flag: only include reads that conform to this flag (like samtools -f option)")
-    global_parser.add_argument("-F", dest="exclflag", default=0, type=int, help="Sam file filter flag: exclude reads that conform to this flag (like samtools -F option)")
+    global_parser.add_argument("-f", dest="reqflag", default=None, type=int, help="Sam file filter flag: have all of the FLAGs present (like samtools -f option)")
+    global_parser.add_argument("-F", dest="exclflag", default=3852, type=int, help="Sam file filter flag: have none of the FLAGs present (like samtools -F option, but exclude duplicates and unmapped read by default)")
     global_parser.add_argument("-q", dest="mapqual", default=60, type=int, help="Minimal mapping quality of reads to be considered (like samtools -q option)")
     global_parser.add_argument("-x", dest="x", default=1000000, type=int, help="Normalisation unit, see norm")
     global_parser.add_argument("--norm", dest="norm", choices=['counts','freq','rpx'], default='counts', help="Normalize: report counts, frequencies or reads per X reads (default x=1000000, set X with -x option).")
@@ -387,7 +456,8 @@ def main():
     global_parser.add_argument("--header", dest="header", action="store_true", default=False, help="Write header for names of features")
     global_parser.add_argument("--name", dest="name", action="store_true", default=False, help="Prefix tab-separated values with the name of the file")
     global_parser.add_argument("-r", dest="reference", default=None, type=str, help="Reference file for: reference depended features cleave-site motifs/binned counts/cram decoding.")
-    
+    global_parser.add_argument("--seed", dest="seed", default=42, type=int, help="Seed for random number generator.")
+
     subparsers = parser.add_subparsers()
     
     parser_csm = subparsers.add_parser('csm',prog="cfstats csm", description="Extract k-length cleave-site motifs using the reference sequence at the 5' start/end of cfDNA fragments.", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
@@ -436,6 +506,8 @@ def main():
 
     args = parser.parse_args()
     
+    random.seed(args.seed)
+
     if hasattr(args, 'func'):
         args.func(args)
     else:
