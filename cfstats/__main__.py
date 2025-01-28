@@ -144,6 +144,36 @@ def _5pends(args):
         else: #counts
             sys.stdout.write("\t".join(map(str,d.values())) + "\n")
 
+revcomptable = str.maketrans("acgtACGTRY","tgcaTGCAYR")
+def revcomp(s):
+    return s.translate(revcomptable)[::-1]
+
+def allk(k,onlylexsmallest=False):
+    kmers=[]
+    for i in range(4**k):
+        s=""
+        for j in range(k):
+            s+="ACGT"[int(i/(4**(k-j-1)))%4]
+        if onlylexsmallest:
+            if s<=revcomp(s):
+                kmers.append(s)
+        else:
+            kmers.append(s)
+    return kmers
+
+def allkp(k,onlylexsmallest=False):
+    kpmers=[]
+    for i in range(2**k):
+        s=""
+        for j in range(k):
+            s+="RY"[int(i/(2**(k-j-1)))%2]
+        if onlylexsmallest:
+            if s<=revcomp(s):
+                kpmers.append(s)
+        else:
+            kpmers.append(s)
+    return kpmers
+
 def cleavesitemotifs(args, cmdline=True):
     
     for samfile in args.samfiles:
@@ -155,21 +185,26 @@ def cleavesitemotifs(args, cmdline=True):
         
         k=args.k
         
-        revcomptable = str.maketrans("acgtACGT","tgcaTGCA")
+        # revcomptable = str.maketrans("acgtACGT","tgcaTGCA")
         # n=int(wildcards.samplen) if wildcards.samplen!="ALL" else None
+
+        if args.purpyr:
+            d={k:0 for k in allkp(k,onlylexsmallest=True)}
+        else:
+            d={k:0 for k in allk(k,onlylexsmallest=True)}        
+
+        # kmers=[]
+        # d={}
+        # for i in range(4**k):
+        #     s=""
+        #     for j in range(k):
+        #         s+="ACGT"[int(i/(4**(k-j-1)))%4]
         
-        kmers=[]
-        d={}
-        for i in range(4**k):
-            s=""
-            for j in range(k):
-                s+="ACGT"[int(i/(4**(k-j-1)))%4]
+        #     rcs=s.translate(revcomptable)[::-1]
         
-            rcs=s.translate(revcomptable)[::-1]
-        
-            if s <= rcs:
-                kmers.append(s)
-                d[s]=0
+        #     if s <= rcs:
+        #         kmers.append(s)
+        #         d[s]=0
         
         if args.maxo!=None:
             total_mapped_reads = sum([int(l.split("\t")[2]) for l in pysam.idxstats(cram.filename).split("\n")[:-1]])
@@ -201,6 +236,11 @@ def cleavesitemotifs(args, cmdline=True):
                 if 'N' not in s:
                     try:
                         rcs=s.translate(revcomptable)[::-1]
+
+                        if args.purpyr:
+                            s=nuc2purpyr(s)
+                            rcs=nuc2purpyr(rcs)
+                        
                         d[s if s<rcs else rcs]+=1
                         i+=1
                     except KeyError: #skip when reads have other characters than ACGT
@@ -342,7 +382,7 @@ def fszd(args, cmdline=True):
             sys.stdout.write("\t".join(map(str,range(args.lower, args.upper)))+"\n")
 
         if args.name:
-            sys.stdout.write(args.samfile+"\t")
+            sys.stdout.write(samfile+"\t")
         
         if args.norm=='freq':    
             sys.stdout.write("\t".join(map(str,v/v.sum()))+"\n")
@@ -463,6 +503,7 @@ def main():
     parser_csm = subparsers.add_parser('csm',prog="cfstats csm", description="Extract k-length cleave-site motifs using the reference sequence at the 5' start/end of cfDNA fragments.", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_csm.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
     parser_csm.add_argument("-k", dest="k", default=4, type=int, help="Length of the cleave-site motifs.")
+    parser_csm.add_argument("--pp", dest="purpyr", action="store_true", default=False, help="Collapse nucleotide sequence to Purine/Pyrimidine sequence.")
     parser_csm.set_defaults(func=cleavesitemotifs)
     
     parser_5pends = subparsers.add_parser('5pends',prog="cfstats 5pends", description="", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
