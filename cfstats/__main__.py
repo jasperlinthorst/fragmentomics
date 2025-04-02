@@ -74,103 +74,108 @@ def fourier_transform_coverage(args):
         
         pysamfile.close()
 
+def worker_5pends(pl):
+    samfile,args=pl
+    cram = pysam.AlignmentFile(samfile, reference_filename=args.reference)
+
+    if args.reference:
+        fasta = pysam.FastaFile(args.reference)
+
+    k = args.k
+
+    revcomptable = str.maketrans("acgtACGT", "tgcaTGCA")
+
+    kmers = []
+    d = {}
+    for i in range(4**k):
+        s = ""
+        for j in range(k):
+            s += "ACGT"[int(i / (4**(k - j - 1))) % 4]
+
+        rcs = s.translate(revcomptable)[::-1]
+
+        if args.uselexsmallest:
+            if s <= rcs:
+                kmers.append(s)
+                d[s] = 0
+        else:
+            kmers.append(s)
+            d[s] = 0
+
+    if args.maxo is not None:
+        total_mapped_reads = sum([int(l.split("\t")[2]) for l in pysam.idxstats(cram.filename).split("\n")[:-1]])
+        samplefrac = args.maxo / total_mapped_reads
+
+    i = 0
+    for read in cram:
+        if args.reqflag is not None:
+            if read.flag & args.reqflag != args.reqflag:
+                continue
+
+        if args.exclflag != 0:
+            if read.flag & args.exclflag != 0:
+                continue
+
+        if args.maxo is not None:
+            if random.random() > samplefrac:
+                continue
+
+        if read.mapping_quality >= args.mapqual and len(read.query_sequence) > args.k * 2:
+            if not read.is_duplicate:
+                if args.useref:
+                    if read.is_reverse:
+                        s = fasta.fetch(read.reference_name, int(read.reference_end - k), int(read.reference_end)).translate(revcomptable)[::-1].upper()
+                    else:
+                        s = fasta.fetch(read.reference_name, int(read.reference_start), int(read.reference_start + k)).upper()
+                else:
+                    s = read.query_sequence[:k].upper() if not read.is_reverse else read.query_sequence[-k:].translate(revcomptable)[::-1].upper()
+
+                if 'N' not in s:
+                    try:
+                        if args.uselexsmallest:
+                            rcs = s.translate(revcomptable)[::-1]
+                            d[s if s < rcs else rcs] += 1
+                        else:
+                            d[s] += 1
+
+                        i += 1
+                    except KeyError:
+                        print("Err", s)
+                        pass
+
+    result = {
+        "samfile": samfile,
+        "d": d
+    }
+    return result
+
 def _5pends(args):
     
-    for samfile in args.samfiles:
-    
-        cram=pysam.AlignmentFile(samfile,reference_filename=args.reference)
-        fasta=pysam.FastaFile(args.reference)
-        
-        k=args.k
-        
-        revcomptable = str.maketrans("acgtACGT","tgcaTGCA")
-        # n=int(wildcards.samplen) if wildcards.samplen!="ALL" else None
-        
-        kmers=[]
-        d={}
-        for i in range(4**k):
-            s=""
-            for j in range(k):
-                s+="ACGT"[int(i/(4**(k-j-1)))%4]
-        
-            rcs=s.translate(revcomptable)[::-1]
-            
-            if args.uselexsmallest:
-                if s <= rcs:
-                    kmers.append(s)
-                    d[s]=0
-            else:
-                kmers.append(s)
-                d[s]=0
-        
-        if args.maxo!=None: # Obtain total mapped reads from index to estimate sample fraction
-            total_mapped_reads = sum([int(l.split("\t")[2]) for l in pysam.idxstats(cram.filename).split("\n")[:-1]])
-            samplefrac=args.maxo/total_mapped_reads
+    with Pool(args.nproc) as pool:
+        results = pool.map(worker_5pends, zip(args.samfiles, [args]*len(args.samfiles)))
 
-        i=0
-        for read in cram:
+    for result in results:
+        samfile = result["samfile"]
+        d = result["d"]
 
-            if args.reqflag != None:
-                if read.flag & args.reqflag != args.reqflag:
-                    continue
-            
-            if args.exclflag != 0:
-                if read.flag & args.exclflag != 0:
-                    continue
-
-            if args.maxo!=None: #restrict to sample approximately maxo reads
-                if random.random() > samplefrac:
-                    continue
-
-            if read.mapping_quality>=args.mapqual and len(read.query_sequence)>args.k*2: #and read.flag(args.incflag)
-
-                if not read.is_duplicate:
-
-                    if args.useref:
-                        if read.is_reverse:
-                            s=fasta.fetch(read.reference_name,int(read.reference_end-k),int(read.reference_end)).translate(revcomptable)[::-1].upper()
-                        else:
-                            s=fasta.fetch(read.reference_name,int(read.reference_start),int(read.reference_start+k)).upper()
-                    else:
-                        s=read.query_sequence[:k].upper() if not read.is_reverse else read.query_sequence[-k:].translate(revcomptable)[::-1].upper()
-
-                    # print("ref",fasta.fetch(read.reference_name,int(read.reference_start),int(read.reference_end)).upper())
-                    # print("qry",read.query_sequence)
-                    # print("reverse",read.is_reverse)
-
-
-                    if 'N' not in s:
-                        try:
-                            if args.uselexsmallest: #only count lexigraphically smallest kmer
-                                rcs=s.translate(revcomptable)[::-1]
-                                d[s if s<rcs else rcs]+=1
-                            else:
-                                d[s]+=1
-                            
-                            i+=1
-                        except KeyError: #skip when reads have other characters than ACGT or are not in the dictionary for another reason
-                            print("Err",s)
-                            pass
-        
-        if args.header and samfile==args.samfiles[0]:
+        if args.header and samfile == args.samfiles[0]:
             if args.name:
                 sys.stdout.write("filename\t")
-            sys.stdout.write("\t".join(map(str,list(d.keys()))) + "\n")
-        
-        if args.name:
-            sys.stdout.write(samfile+"\t")
-        
-        if args.norm=='freq':
-            c=np.array(list(d.values()))
-            f=c/c.sum()
-            sys.stdout.write("\t".join(map(str,f)) + "\n")
-        elif args.norm=='rpx':
-            c=np.array(list(d.values()))
-            f=(c/(c.sum()/args.x)).astype(int)
-            sys.stdout.write("\t".join(map(str,f)) + "\n")
-        else: #counts
-            sys.stdout.write("\t".join(map(str,d.values())) + "\n")
+            sys.stdout.write("\t".join(map(str, list(d.keys()))) + "\n")
 
+        if args.name:
+            sys.stdout.write(samfile + "\t")
+
+        if args.norm == 'freq':
+            c = np.array(list(d.values()))
+            f = c / c.sum()
+            sys.stdout.write("\t".join(map(str, f)) + "\n")
+        elif args.norm == 'rpx':
+            c = np.array(list(d.values()))
+            f = (c / (c.sum() / args.x)).astype(int)
+            sys.stdout.write("\t".join(map(str, f)) + "\n")
+        else:
+            sys.stdout.write("\t".join(map(str, d.values())) + "\n")
 
 def _5pendsbysize(args, cmdline=True):
     
@@ -248,7 +253,6 @@ def _5pendsbysize(args, cmdline=True):
         
         m=pd.DataFrame(d)
         m.T.to_csv(sys.stdout,sep="\t",index=True)
-
 
 def cleavesitemotifsbysize(args, cmdline=True):
     
@@ -338,7 +342,6 @@ def cleavesitemotifsbysize(args, cmdline=True):
 
         # sys.stdout.write("\t".join(map(str,f)) + "\n")
 
-
 def cleavesitemotifs(args, cmdline=True):
     
     for samfile in args.samfiles:
@@ -399,7 +402,6 @@ def cleavesitemotifs(args, cmdline=True):
         c=np.array(list(d.values()))
         if args.norm=='freq':
             f=c/c.sum()
-            
         elif args.norm=='rpx':
             f=(c/(c.sum()/args.x)).astype(int)
         else:
@@ -519,9 +521,16 @@ def fszd(args, cmdline=True):
                     if read.query_length>=args.lower and read.query_length<args.upper:
                         fszd[read.query_length]+=1
                     i+=1
-            
-        v=np.array([fszd[sz] for sz in range(args.lower,args.upper,1)])
         
+        c=np.array([fszd[sz] for sz in range(args.lower,args.upper,1)])
+        
+        if args.norm=='freq':
+            v=c/c.sum()
+        elif args.norm=='rpx':
+            v=(c/(c.sum()/args.x)).astype(int)
+        else:
+            v=c
+
         if not cmdline:
             return v
 
@@ -605,15 +614,17 @@ def delfi(args, cmdline=True):
 import sklearn
 import pickle
 import base64
+from multiprocessing import Pool
 
 def R206C(args):
     (pca,clfb,clfgt,reg)=pickle.load(open(args.clf, 'rb'))
 
-    args.k=4
+    args.k=8
     args.norm='rpx'
     args.x=1000000
+    args.purpyr=False
 
-    f=np.array(list(cleavesitemotifs(args, cmdline=False))).reshape(1,-1)
+    f=np.array(list(cleavesitemotifs(args, cmdline=False, ))).reshape(1,-1)
 
     fp=pca.transform(f)
 
@@ -635,6 +646,7 @@ def main():
     global_parser.add_argument("-F", dest="exclflag", default=3852, type=int, help="Sam file filter flag: have none of the FLAGs present (like samtools -F option, but exclude duplicates and unmapped read by default)")
     global_parser.add_argument("-q", dest="mapqual", default=60, type=int, help="Minimal mapping quality of reads to be considered (like samtools -q option)")
     global_parser.add_argument("-x", dest="x", default=1000000, type=int, help="Normalisation unit, see norm")
+    global_parser.add_argument("--nproc", dest="nproc", default=1, type=int, help="Number of parallel processes to use.")
     global_parser.add_argument("--norm", dest="norm", choices=['counts','freq','rpx'], default='counts', help="Normalize: report counts, frequencies or reads per X reads (default x=1000000, set X with -x option).")
 
     global_parser.add_argument("-o", dest="maxo", default=None, type=int, help="Limit stats to maxo observations.")
@@ -711,13 +723,13 @@ def main():
     parser_fourier.set_defaults(func=fourier_transform_coverage)
 
     args = parser.parse_args()
-    
-    random.seed(args.seed)
 
     if hasattr(args, 'func'):
+        random.seed(args.seed)
         args.func(args)
     else:
         parser.print_help()
 
 if __name__ == '__main__':
     main()
+    
