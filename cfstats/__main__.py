@@ -108,16 +108,16 @@ def worker_5pends(pl):
 
     i = 0
     for read in cram:
+        if args.maxo is not None:
+            if random.random() > samplefrac:
+                continue
+
         if args.reqflag is not None:
             if read.flag & args.reqflag != args.reqflag:
                 continue
 
         if args.exclflag != 0:
             if read.flag & args.exclflag != 0:
-                continue
-
-        if args.maxo is not None:
-            if random.random() > samplefrac:
                 continue
 
         if read.mapping_quality >= args.mapqual and len(read.query_sequence) > args.k * 2:
@@ -149,14 +149,19 @@ def worker_5pends(pl):
     }
     return result
 
-def _5pends(args):
+def _5pends(args, cmdline=True):
     
+    v=[]
     with Pool(args.nproc) as pool:
         results = pool.map(worker_5pends, zip(args.samfiles, [args]*len(args.samfiles)))
 
     for result in results:
         samfile = result["samfile"]
         d = result["d"]
+
+        if not cmdline:
+            v.append(list(d.values()))
+            continue
 
         if args.header and samfile == args.samfiles[0]:
             if args.name:
@@ -176,6 +181,7 @@ def _5pends(args):
             sys.stdout.write("\t".join(map(str, f)) + "\n")
         else:
             sys.stdout.write("\t".join(map(str, d.values())) + "\n")
+    return v
 
 def _5pendsbysize(args, cmdline=True):
     
@@ -364,7 +370,10 @@ def cleavesitemotifs(args, cmdline=True):
 
         i=0
         for read in cram.fetch():
-            
+            if args.maxo!=None: #restrict to sample approximately maxo reads
+                if random.random() > samplefrac:
+                    continue
+        
             if args.reqflag != None:
                 if read.flag & args.reqflag != args.reqflag:
                     continue
@@ -375,10 +384,6 @@ def cleavesitemotifs(args, cmdline=True):
                         
             if read.mapping_quality<args.mapqual:
                 continue
-            
-            if args.maxo!=None: #restrict to sample approximately maxo reads
-                if random.random() > samplefrac:
-                    continue
             
             if read.reference_start>int(k/2) and read.reference_end<cram.get_reference_length(read.reference_name)-int(k/2):
                 if read.is_reverse:
@@ -440,16 +445,16 @@ def bincounts(args, cmdline=True):
             samplefrac=args.maxo/total_mapped_reads
 
         for read in cram:
+            if args.maxo!=None: #restrict to sample approximately maxo reads
+                if random.random() > samplefrac:
+                    continue
+
             if args.reqflag != None:
                 if read.flag & args.reqflag != args.reqflag:
                     continue
             
             if args.exclflag != 0:
                 if read.flag & args.exclflag != 0:
-                    continue
-
-            if args.maxo!=None: #restrict to sample approximately maxo reads
-                if random.random() > samplefrac:
                     continue
             
             if read.mapping_quality>=args.mapqual:
@@ -465,6 +470,9 @@ def bincounts(args, cmdline=True):
         for ref in bins:
             v+=list(bins[ref])
         
+        if not cmdline:
+            return v
+
         if args.header and samfile==args.samfiles[0]:
             if args.name:
                 sys.stdout.write("filename\t")
@@ -499,6 +507,11 @@ def fszd(args, cmdline=True):
 
         i=0
         for read in cram:
+
+            if args.maxo!=None: #restrict to sample approximately maxo reads
+                if random.random() > samplefrac:
+                    continue
+
             if args.reqflag != None:
                 if read.flag & args.reqflag != args.reqflag:
                     continue
@@ -506,11 +519,7 @@ def fszd(args, cmdline=True):
             if args.exclflag != 0:
                 if read.flag & args.exclflag != 0:
                     continue
-                
-            if args.maxo!=None: #restrict to sample approximately maxo reads
-                if random.random() > samplefrac:
-                    continue
-
+            
             if read.mapping_quality>=args.mapqual and not read.is_duplicate:
                 if args.insertissize:
                     if read.template_length!=None and read.is_read2:
@@ -623,7 +632,7 @@ def R206C(args):
     args.norm='rpx'
     args.x=1000000
     args.purpyr=False
-
+    
     f=np.array(list(cleavesitemotifs(args, cmdline=False, ))).reshape(1,-1)
 
     fp=pca.transform(f)
@@ -635,6 +644,44 @@ def R206C(args):
     actreg=reg.predict(fp)[0]
 
     sys.stdout.write(f"R206C genotype prediction: {gt} (0={classp[0]:.2f},1={classp[1]:.2f},2={classp[2]:.2f})\tR206C homozygous vs WT: {b}\tDNASE1L3 plasma activity regression: {actreg:.3f}\n")
+
+def plot_fragmentome(args):
+    
+    from matplotlib import pyplot as plt
+
+    (reducer,embedding,k)=pickle.load(open(args.mapping, 'rb'))
+
+    args.k=4
+    args.norm='rpx'
+    args.x=1000000
+    args.purpyr=False
+    args.uselexsmallest=False
+    args.useref=False
+    args.insertissize=True
+    args.lower=60
+    args.upper=600
+
+    Xfszd=np.array(fszd(args, cmdline=False, )).reshape(1,-1)
+    # print(Xfszd)
+    Xcsm=np.array(cleavesitemotifs(args, cmdline=False, )).reshape(1,-1)
+    # print(Xcsm)
+    Xsem=np.array(_5pends(args, cmdline=False, )).reshape(1,-1)
+    # print(Xsem)
+
+    f=np.concatenate((Xfszd,Xcsm,Xsem),axis=1)
+
+    print(f.shape)
+    # print(f)
+
+    fp=reducer.transform(f)
+
+    plt.scatter(embedding[:,0],embedding[:,1],c='blue',s=5,alpha=0.5)
+    plt.scatter(fp[:,0],fp[:,1],c='red',s=5,alpha=1)
+    plt.show()
+    if args.outfile is None:
+        args.outfile="fragmentome.png"
+    plt.savefig(args.outfile)
+    plt.close()
 
 parser = argparse.ArgumentParser(prog="cfstats", usage="cfstats -h", description="Gather cfDNA statistics", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
@@ -716,6 +763,12 @@ def main():
     parser_R206C.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
     parser_R206C.add_argument('clf', help='Pickled pca/classifier/regressor model')
     parser_R206C.set_defaults(func=R206C)
+
+    parser_plot = subparsers.add_parser('plot',prog="cfstats R206C", description="Plot points in fragmentome embedding", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
+    parser_plot.add_argument("--outfile", dest="outfile", default=None, help="Name of the file to store the plot.")
+    parser_plot.add_argument('mapping', help='Pickled embedding')
+    parser_plot.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
+    parser_plot.set_defaults(func=plot_fragmentome)
 
     parser_fourier = subparsers.add_parser('fourier', prog="cfstats fourier", description="Extract Fourier transformed coverage profile for each gene", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_fourier.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
