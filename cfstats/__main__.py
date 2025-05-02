@@ -6,6 +6,11 @@ import argparse
 import sys
 import os 
 import random
+import sklearn
+import pickle
+import base64
+from multiprocessing import Pool
+
 
 revcomptable = str.maketrans("acgtACGTRY","tgcaTGCAYR")
 def revcomp(s):
@@ -260,95 +265,104 @@ def _5pendsbysize(args, cmdline=True):
         m=pd.DataFrame(d)
         m.T.to_csv(sys.stdout,sep="\t",index=True)
 
-def cleavesitemotifsbysize(args, cmdline=True):
+def worker_cleavesitemotifs(pl):
+    samfile,args=pl
+    cram = pysam.AlignmentFile(samfile, reference_filename=args.reference)
+
+    if args.reference==None:
+        parser.error("Reference file is required.")
+
+    cram=pysam.AlignmentFile(samfile,reference_filename=args.reference)
+    fasta=pysam.FastaFile(args.reference)
     
-    for samfile in args.samfiles:
-        if args.reference==None:
-            parser.error("Reference file is required.")
+    k=args.k
+    
+    if args.purpyr:
+        d={k:0 for k in allkp(k,onlylexsmallest=True)}
+    else:
+        d={k:0 for k in allk(k,onlylexsmallest=True)}        
+    
+    if args.maxo!=None:
+        total_mapped_reads = sum([int(l.split("\t")[2]) for l in pysam.idxstats(cram.filename).split("\n")[:-1]])
+        samplefrac=args.maxo/total_mapped_reads
 
-        cram=pysam.AlignmentFile(samfile,reference_filename=args.reference)
-        fasta=pysam.FastaFile(args.reference)
-        
-        k=args.k
-        
-        if args.purpyr:
-            d={k:{i:0 for i in range(args.lower,args.upper)} for k in allkp(k,onlylexsmallest=True)}
-        else:
-            d={k:{i:0 for i in range(args.lower,args.upper)} for k in allk(k,onlylexsmallest=True)}        
-        
-        if args.maxo!=None:
-            total_mapped_reads = sum([int(l.split("\t")[2]) for l in pysam.idxstats(cram.filename).split("\n")[:-1]])
-            samplefrac=args.maxo/total_mapped_reads
-
-        i=0
-        for read in cram.fetch():
-            
-            if args.reqflag != None:
-                if read.flag & args.reqflag != args.reqflag:
-                    continue
-            
-            if args.exclflag != 0:
-                if read.flag & args.exclflag != 0:
-                    continue
-                        
-            if read.mapping_quality<args.mapqual:
+    i=0
+    for read in cram.fetch():
+        if args.maxo!=None: #restrict to sample approximately maxo reads
+            if random.random() > samplefrac:
                 continue
-            
-            if args.maxo!=None: #restrict to sample approximately maxo reads
-                if random.random() > samplefrac:
-                    continue
-            
-            if read.reference_start>int(k/2) and read.reference_end<cram.get_reference_length(read.reference_name)-int(k/2):
-                if read.is_reverse:
-                    s=fasta.fetch(read.reference_name,int(read.reference_end-k/2),int(read.reference_end+k/2)).upper()
-                else:
-                    s=fasta.fetch(read.reference_name,int(read.reference_start-k/2),int(read.reference_start+k/2)).upper()
-                if 'N' not in s:
-                    try:
-                        rcs=s.translate(revcomptable)[::-1]
+    
+        if args.reqflag != None:
+            if read.flag & args.reqflag != args.reqflag:
+                continue
+        
+        if args.exclflag != 0:
+            if read.flag & args.exclflag != 0:
+                continue
+                    
+        if read.mapping_quality<args.mapqual:
+            continue
+        
+        if read.reference_start>int(k/2) and read.reference_end<cram.get_reference_length(read.reference_name)-int(k/2):
+            if read.is_reverse:
+                s=fasta.fetch(read.reference_name,int(read.reference_end-k/2),int(read.reference_end+k/2)).upper()
+            else:
+                s=fasta.fetch(read.reference_name,int(read.reference_start-k/2),int(read.reference_start+k/2)).upper()
+            if 'N' not in s:
+                try:
+                    rcs=s.translate(revcomptable)[::-1]
 
-                        if args.purpyr:
-                            s=nuc2purpyr(s)
-                            rcs=nuc2purpyr(rcs)
+                    if args.purpyr:
+                        s=nuc2purpyr(s)
+                        rcs=nuc2purpyr(rcs)
+                    
+                    d[s if s<rcs else rcs]+=1
+                    i+=1
+                except KeyError: #skip when reads have other characters than ACGT
+                    print("Err",s)
+                    pass
 
-                        if args.insertissize:
-                            if abs(read.template_length)>=args.lower and abs(read.template_length)<args.upper:
-                                d[s if s<rcs else rcs][abs(read.template_length)]+=1
-                        else:
-                            if read.query_length>=args.lower and read.query_length<args.upper:
-                                d[s if s<rcs else rcs][read.query_length]+=1
-                        
-                        i+=1
-                    except KeyError: #skip when reads have other characters than ACGT
-                        print("Err",s)
-                        pass
-                
-        m=pd.DataFrame(d)
-        m.T.to_csv(sys.stdout,sep="\t",index=True)
-
-        # c=np.array(list(d.values()))
-        # if args.norm=='freq':
-        #     f=c/c.sum()
-            
-        # elif args.norm=='rpx':
-        #     f=(c/(c.sum()/args.x)).astype(int)
-        # else:
-        #     f=c
-
-        # if not cmdline: #return values instead of printing
-        #     return f
-
-        # if args.header and samfile==args.samfiles[0]:
-        #     if args.name:
-        #         sys.stdout.write("filename\t")
-        #     sys.stdout.write("\t".join(map(str,list(d.keys()))) + "\n")
-
-        # if args.name:
-        #     sys.stdout.write(samfile+"\t")
-
-        # sys.stdout.write("\t".join(map(str,f)) + "\n")
+    result = {
+        "samfile": samfile,
+        "d": d
+    }
+    return result
 
 def cleavesitemotifs(args, cmdline=True):
+    
+    v=[]
+    with Pool(args.nproc) as pool:
+        results = pool.map(worker_cleavesitemotifs, zip(args.samfiles, [args]*len(args.samfiles)))
+
+    for result in results:
+        samfile = result["samfile"]
+        d = result["d"]
+
+        if not cmdline:
+            v.append(list(d.values()))
+            continue
+
+        if args.header and samfile == args.samfiles[0]:
+            if args.name:
+                sys.stdout.write("filename\t")
+            sys.stdout.write("\t".join(map(str, list(d.keys()))) + "\n")
+
+        if args.name:
+            sys.stdout.write(samfile + "\t")
+
+        if args.norm == 'freq':
+            c = np.array(list(d.values()))
+            f = c / c.sum()
+            sys.stdout.write("\t".join(map(str, f)) + "\n")
+        elif args.norm == 'rpx':
+            c = np.array(list(d.values()))
+            f = (c / (c.sum() / args.x)).astype(int)
+            sys.stdout.write("\t".join(map(str, f)) + "\n")
+        else:
+            sys.stdout.write("\t".join(map(str, d.values())) + "\n")
+    return v
+
+def cleavesitemotifs_old(args, cmdline=True):
     
     for samfile in args.samfiles:
         if args.reference==None:
@@ -425,6 +439,72 @@ def cleavesitemotifs(args, cmdline=True):
 
         sys.stdout.write("\t".join(map(str,f)) + "\n")
 
+def cleavesitemotifsbysize(args, cmdline=True):
+    
+    for samfile in args.samfiles:
+        if args.reference==None:
+            parser.error("Reference file is required.")
+
+        cram=pysam.AlignmentFile(samfile,reference_filename=args.reference)
+        fasta=pysam.FastaFile(args.reference)
+        
+        k=args.k
+        
+        if args.purpyr:
+            d={k:{i:0 for i in range(args.lower,args.upper)} for k in allkp(k,onlylexsmallest=True)}
+        else:
+            d={k:{i:0 for i in range(args.lower,args.upper)} for k in allk(k,onlylexsmallest=True)}        
+        
+        if args.maxo!=None:
+            total_mapped_reads = sum([int(l.split("\t")[2]) for l in pysam.idxstats(cram.filename).split("\n")[:-1]])
+            samplefrac=args.maxo/total_mapped_reads
+
+        i=0
+        for read in cram.fetch():
+            
+            if args.reqflag != None:
+                if read.flag & args.reqflag != args.reqflag:
+                    continue
+            
+            if args.exclflag != 0:
+                if read.flag & args.exclflag != 0:
+                    continue
+                        
+            if read.mapping_quality<args.mapqual:
+                continue
+            
+            if args.maxo!=None: #restrict to sample approximately maxo reads
+                if random.random() > samplefrac:
+                    continue
+            
+            if read.reference_start>int(k/2) and read.reference_end<cram.get_reference_length(read.reference_name)-int(k/2):
+                if read.is_reverse:
+                    s=fasta.fetch(read.reference_name,int(read.reference_end-k/2),int(read.reference_end+k/2)).upper()
+                else:
+                    s=fasta.fetch(read.reference_name,int(read.reference_start-k/2),int(read.reference_start+k/2)).upper()
+                if 'N' not in s:
+                    try:
+                        rcs=s.translate(revcomptable)[::-1]
+
+                        if args.purpyr:
+                            s=nuc2purpyr(s)
+                            rcs=nuc2purpyr(rcs)
+
+                        if args.insertissize:
+                            if abs(read.template_length)>=args.lower and abs(read.template_length)<args.upper:
+                                d[s if s<rcs else rcs][abs(read.template_length)]+=1
+                        else:
+                            if read.query_length>=args.lower and read.query_length<args.upper:
+                                d[s if s<rcs else rcs][read.query_length]+=1
+                        
+                        i+=1
+                    except KeyError: #skip when reads have other characters than ACGT
+                        print("Err",s)
+                        pass
+                
+        m=pd.DataFrame(d)
+        m.T.to_csv(sys.stdout,sep="\t",index=True)
+
 def bincounts(args, cmdline=True):    
 
     for samfile in args.samfiles:
@@ -489,9 +569,88 @@ def bincounts(args, cmdline=True):
         else:
             sys.stdout.write("\t".join(map(str,v))+"\n")
 
+def worker_fszd(pl):
+    samfile,args=pl
+    cram = pysam.AlignmentFile(samfile, reference_filename=args.reference)
+    if args.reference==None:
+        parser.error("Reference file is required.")
+    fszd = {}
+    for fsz in range(args.lower, args.upper):
+        fszd[fsz] = 0
+    if args.maxo != None:
+        total_mapped_reads = sum([int(l.split("\t")[2]) for l in pysam.idxstats(cram.filename).split("\n")[:-1]])
+        samplefrac = args.maxo / total_mapped_reads
+    i = 0
+    for read in cram:
+        if args.maxo != None:
+            if random.random() > samplefrac:
+                continue
+        if args.reqflag != None:
+            if read.flag & args.reqflag != args.reqflag:
+                continue
+        if args.exclflag != 0:
+            if read.flag & args.exclflag != 0:
+                continue
+        if read.mapping_quality >= args.mapqual:
+            if args.insertissize:
+                if read.template_length != None and read.is_read2 and (read.is_reverse != read.mate_is_reverse):
+                    if abs(read.template_length) >= args.lower and abs(read.template_length) < args.upper:
+                        fszd[abs(read.template_length)] += 1
+                        i += 1
+            else:
+                if read.query_length >= args.lower and read.query_length < args.upper:
+                    fszd[read.query_length] += 1
+                i += 1
+
+    result = {
+        "samfile": samfile,
+        "fszd": fszd
+    }
+    return result
+
 def fszd(args, cmdline=True):
+
+    if args.bamlist!=None:
+        with open(args.bamlist) as f:
+            args.samfiles = args.samfiles+[l.strip() for l in f.readlines()]
+
+    V=[]
+    with Pool(args.nproc) as pool:
+        results = pool.map(worker_fszd, zip(args.samfiles, [args]*len(args.samfiles)))
+    
+    for result in results:
+        samfile = result["samfile"]
+        fszd = result["fszd"]
+
+        if args.norm == 'freq':
+            c = np.array([fszd[sz] for sz in range(args.lower, args.upper, 1)])
+            v = c / c.sum()
+        elif args.norm == 'rpx':
+            c = np.array([fszd[sz] for sz in range(args.lower, args.upper, 1)])
+            v = (c / (c.sum() / args.x)).astype(int)
+        else:
+            v = np.array([fszd[sz] for sz in range(args.lower, args.upper, 1)])
+
+        if not cmdline:
+            V.append(np.array([fszd[sz] for sz in range(args.lower, args.upper, 1)]))
+        else:
+            if args.header and samfile == args.samfiles[0]:
+                if args.name:
+                    sys.stdout.write("filename\t")
+                sys.stdout.write("\t".join(map(str, range(args.lower, args.upper))) + "\n")
+            if args.name:
+                sys.stdout.write(samfile + "\t")
+            sys.stdout.write("\t".join(map(str, v)) + "\n")
+    if not cmdline:
+        if len(V)==1:
+            return V[0]
+        else:
+            return V
+
+def fszd_old(args, cmdline=True):
     
     for samfile in args.samfiles:
+
         cram=pysam.AlignmentFile(samfile,reference_filename=args.reference)
         
         fszd={}
@@ -520,9 +679,12 @@ def fszd(args, cmdline=True):
                 if read.flag & args.exclflag != 0:
                     continue
             
-            if read.mapping_quality>=args.mapqual and not read.is_duplicate:
+#if not read.is_proper_pair or read.is_secondary or read.is_supplementary:
+        # continue
+
+            if read.mapping_quality>=args.mapqual:
                 if args.insertissize:
-                    if read.template_length!=None and read.is_read2:
+                    if read.template_length!=None and read.is_read2 and (read.is_reverse != read.mate_is_reverse): #only count read2, and only if it is on the reverse strand
                         if abs(read.template_length)>=args.lower and abs(read.template_length)<args.upper:
                             fszd[abs(read.template_length)]+=1
                             i+=1
@@ -557,6 +719,8 @@ def fszd(args, cmdline=True):
             sys.stdout.write("\t".join(map(str,(v/(v.sum()/args.x)).astype(int)))+"\n")
         else:
             sys.stdout.write("\t".join(map(str,v))+"\n")
+
+        sys.stderr.write(f"Processed {i} read pairs in {samfile}")
 
 def delfi(args, cmdline=True):
 
@@ -620,10 +784,6 @@ def delfi(args, cmdline=True):
         
         sys.stdout.write("\t".join( map(str,(np.array(vshort)+1)/(np.array(vlong)+1) ) ) +"\n")
 
-import sklearn
-import pickle
-import base64
-from multiprocessing import Pool
 
 def R206C(args):
     (pca,clfb,clfgt,reg)=pickle.load(open(args.clf, 'rb'))
@@ -662,11 +822,11 @@ def plot_fragmentome(args):
     args.upper=600
 
     Xfszd=np.array(fszd(args, cmdline=False, )).reshape(1,-1)
-    # print(Xfszd)
+    print("fszd",Xfszd)
     Xcsm=np.array(cleavesitemotifs(args, cmdline=False, )).reshape(1,-1)
-    # print(Xcsm)
+    print("csm",Xcsm)
     Xsem=np.array(_5pends(args, cmdline=False, )).reshape(1,-1)
-    # print(Xsem)
+    print("sem",Xsem)
 
     f=np.concatenate((Xfszd,Xcsm,Xsem),axis=1)
 
@@ -674,10 +834,11 @@ def plot_fragmentome(args):
     # print(f)
 
     fp=reducer.transform(f)
+    print(fp)
 
     plt.scatter(embedding[:,0],embedding[:,1],c='blue',s=5,alpha=0.5)
     plt.scatter(fp[:,0],fp[:,1],c='red',s=5,alpha=1)
-    plt.show()
+    # plt.show()
     if args.outfile is None:
         args.outfile="fragmentome.png"
     plt.savefig(args.outfile)
@@ -686,7 +847,6 @@ def plot_fragmentome(args):
 parser = argparse.ArgumentParser(prog="cfstats", usage="cfstats -h", description="Gather cfDNA statistics", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
 def main():
-    
     global_parser = argparse.ArgumentParser(add_help=False) #parser for arguments that apply to all subcommands
 
     global_parser.add_argument("-f", dest="reqflag", default=None, type=int, help="Sam file filter flag: have all of the FLAGs present (like samtools -f option)")
@@ -698,7 +858,7 @@ def main():
 
     global_parser.add_argument("-o", dest="maxo", default=None, type=int, help="Limit stats to maxo observations.")
     global_parser.add_argument("--header", dest="header", action="store_true", default=False, help="Write header for names of features")
-    global_parser.add_argument("--name", dest="name", action="store_true", default=False, help="Prefix tab-separated values with the name of the file")
+    global_parser.add_argument("--noname", dest="name", action="store_false", default=True, help="Do not prefix tab-separated values with the name of the file")
     global_parser.add_argument("-r", dest="reference", default=None, type=str, help="Reference file for: reference depended features cleave-site motifs/binned counts/cram decoding.")
     global_parser.add_argument("--seed", dest="seed", default=42, type=int, help="Seed for random number generator.")
 
@@ -743,7 +903,8 @@ def main():
     parser_bincounts.set_defaults(func=bincounts)
 
     parser_fszd = subparsers.add_parser('fszd',prog="cfstats fszd", description="Extract fragment size distribution (only for paired-end data)", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
-    parser_fszd.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
+    parser_fszd.add_argument('samfiles', nargs='*', help='sam/bam/cram file')
+    parser_fszd.add_argument("--bamlist", dest="bamlist", type=str, default=None, help="File containing a list of sam/bam/cram files (one per line).")
     parser_fszd.add_argument('-l','--lower', default=60, type=int, help='Lower limit for fragments to report')
     parser_fszd.add_argument('-u','--upper', default=600, type=int, help='Upper limit for fragments to report')
     parser_fszd.add_argument("--noinsert", dest="insertissize", action="store_false", default=True, help="In case of long-read/unpaired sequencing infer fragmentsize from sequence instead of insert.")
