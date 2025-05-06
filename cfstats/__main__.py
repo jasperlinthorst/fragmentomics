@@ -164,10 +164,19 @@ def _5pends(args, cmdline=True):
         samfile = result["samfile"]
         d = result["d"]
 
-        if not cmdline:
-            v.append(list(d.values()))
-            continue
+        if args.norm == 'freq':
+            c = np.array(list(d.values()))
+            f = c / c.sum()
+        elif args.norm == 'rpx':
+            c = np.array(list(d.values()))
+            f = (c / (c.sum() / args.x)).astype(int)
+        else:
+            f = np.array(list(d.values()))
 
+        if not cmdline:
+            v.append(f)
+            continue
+        
         if args.header and samfile == args.samfiles[0]:
             if args.name:
                 sys.stdout.write("filename\t")
@@ -176,16 +185,8 @@ def _5pends(args, cmdline=True):
         if args.name:
             sys.stdout.write(samfile + "\t")
 
-        if args.norm == 'freq':
-            c = np.array(list(d.values()))
-            f = c / c.sum()
-            sys.stdout.write("\t".join(map(str, f)) + "\n")
-        elif args.norm == 'rpx':
-            c = np.array(list(d.values()))
-            f = (c / (c.sum() / args.x)).astype(int)
-            sys.stdout.write("\t".join(map(str, f)) + "\n")
-        else:
-            sys.stdout.write("\t".join(map(str, d.values())) + "\n")
+        sys.stdout.write("\t".join(map(str, f)) + "\n")
+
     return v
 
 def _5pendsbysize(args, cmdline=True):
@@ -338,8 +339,17 @@ def cleavesitemotifs(args, cmdline=True):
         samfile = result["samfile"]
         d = result["d"]
 
+        if args.norm == 'freq':
+            c = np.array(list(d.values()))
+            f = c / c.sum()
+        elif args.norm == 'rpx':
+            c = np.array(list(d.values()))
+            f = (c / (c.sum() / args.x)).astype(int)
+        else:
+            f = np.array(list(d.values()))
+
         if not cmdline:
-            v.append(list(d.values()))
+            v.append(f)
             continue
 
         if args.header and samfile == args.samfiles[0]:
@@ -350,16 +360,8 @@ def cleavesitemotifs(args, cmdline=True):
         if args.name:
             sys.stdout.write(samfile + "\t")
 
-        if args.norm == 'freq':
-            c = np.array(list(d.values()))
-            f = c / c.sum()
-            sys.stdout.write("\t".join(map(str, f)) + "\n")
-        elif args.norm == 'rpx':
-            c = np.array(list(d.values()))
-            f = (c / (c.sum() / args.x)).astype(int)
-            sys.stdout.write("\t".join(map(str, f)) + "\n")
-        else:
-            sys.stdout.write("\t".join(map(str, d.values())) + "\n")
+        sys.stdout.write("\t".join(map(str, f)) + "\n")
+    
     return v
 
 def cleavesitemotifs_old(args, cmdline=True):
@@ -632,7 +634,7 @@ def fszd(args, cmdline=True):
             v = np.array([fszd[sz] for sz in range(args.lower, args.upper, 1)])
 
         if not cmdline:
-            V.append(np.array([fszd[sz] for sz in range(args.lower, args.upper, 1)]))
+            V.append(v)#np.array([fszd[sz] for sz in range(args.lower, args.upper, 1)]))
         else:
             if args.header and samfile == args.samfiles[0]:
                 if args.name:
@@ -713,12 +715,12 @@ def fszd_old(args, cmdline=True):
         if args.name:
             sys.stdout.write(samfile+"\t")
         
-        if args.norm=='freq':    
-            sys.stdout.write("\t".join(map(str,v/v.sum()))+"\n")
-        elif args.norm=='rpx':
-            sys.stdout.write("\t".join(map(str,(v/(v.sum()/args.x)).astype(int)))+"\n")
-        else:
-            sys.stdout.write("\t".join(map(str,v))+"\n")
+        # if args.norm=='freq':    
+        #     sys.stdout.write("\t".join(map(str,v/v.sum()))+"\n")
+        # elif args.norm=='rpx':
+        #     sys.stdout.write("\t".join(map(str,(v/(v.sum()/args.x)).astype(int)))+"\n")
+        # else:
+        sys.stdout.write("\t".join(map(str,v))+"\n")
 
         sys.stderr.write(f"Processed {i} read pairs in {samfile}")
 
@@ -813,6 +815,10 @@ def plot_fragmentome(args):
 
     args.k=4
     args.norm='rpx'
+    
+    args.exclflag=1024
+    args.mapqual=0
+
     args.x=1000000
     args.purpyr=False
     args.uselexsmallest=False
@@ -820,13 +826,17 @@ def plot_fragmentome(args):
     args.insertissize=True
     args.lower=60
     args.upper=600
+    args.bamlist=None
 
     Xfszd=np.array(fszd(args, cmdline=False, )).reshape(1,-1)
-    print("fszd",Xfszd)
+    
+    args.mapqual=60
+    args.exclflag=3852
     Xcsm=np.array(cleavesitemotifs(args, cmdline=False, )).reshape(1,-1)
-    print("csm",Xcsm)
+    print("csm",Xcsm,Xcsm.sum())
+
     Xsem=np.array(_5pends(args, cmdline=False, )).reshape(1,-1)
-    print("sem",Xsem)
+    print("sem",Xsem,Xsem.sum())
 
     f=np.concatenate((Xfszd,Xcsm,Xsem),axis=1)
 
