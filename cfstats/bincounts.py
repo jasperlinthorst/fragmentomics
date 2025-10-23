@@ -48,7 +48,7 @@ def worker_bincounts(pl):
     
     return {'samfile':samfile, 'd':bins}
 
-def bincounts(args, cmdline=True):    
+def bincounts(args, cmdline=True):
     if args.reference==None:
         parser.error("Reference file is required.")
     
