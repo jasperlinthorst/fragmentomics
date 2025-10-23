@@ -11,18 +11,22 @@ def ff(args):
     clf=tup[0]
     feats=tup[1]
 
-    #for now use hardcoded match with working model
+    #for now use hardcoded match with how our model was trained
     args.binsize=50000
     args.header=True #we need to header to select the right features
+    args.exclflag=1024
+    args.mapqual=1
 
     columns, counts = bincounts.bincounts(args,cmdline=False)
     
     X=pd.DataFrame(counts,columns=columns)
     
-    #norm
-    X=X.loc[:,feats].div(X.sum(axis=1),axis=0)
+    #norm and select bins
+    X=X.div(X.sum(axis=1),axis=0).loc[:,feats]
 
-    return clf.predict(X)
+    ff=clf.predict(Xnorm)
+
+    return ff
     # X=bincounts.loc[:,tup[1]].values/bincounts.values.sum()
 
     # X=bincounts.bincounts(args,cmdline=False)
