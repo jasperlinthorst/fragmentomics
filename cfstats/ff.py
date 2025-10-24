@@ -1,12 +1,24 @@
 import pandas as pd
 import sklearn
 import pickle
-from glmnet import ElasticNet as glmElasticNet
 import numpy as np
 from cfstats import bincounts
+import sys
 
-def ff(args):
-    tup=pickle.load(open(args.reg, 'rb'))
+
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message="pkg_resources is deprecated as an API"
+)
+from glmnet import ElasticNet as glmElasticNet
+
+
+#cfstats ff /net/beegfs/users/P051809/notebooks/notebooks/ffpredictor_ridge_50kautosomalbins.pickle /net/beegfs/hgn/niptres/allnipt/crams/2019/4/N190307837/N190307837.cram /net/beegfs/hgn/niptres/allnipt/crams/2017/4/N170331413/N170331413.cram /net/beegfs/hgn/niptres/allnipt/crams/2020/1/N200100049/N200100049.cram -r /net/beegfs/hgn/niptres/allnipt/lib/hg38flat.fa --nproc 5
+
+def ff(args, cmdline=True):
+    tup=pickle.load(open(args.predictor, 'rb'))
     #TODO: determine number and type of features based on model
     clf=tup[0]
     feats=tup[1]
@@ -24,14 +36,9 @@ def ff(args):
     #norm and select bins
     X=X.div(X.sum(axis=1),axis=0).loc[:,feats]
 
-    ff=clf.predict(Xnorm)
-
-    return ff
-    # X=bincounts.loc[:,tup[1]].values/bincounts.values.sum()
-
-    # X=bincounts.bincounts(args,cmdline=False)
-
-    # ff=reg.predict(X)
-
-    # for samfile in args.samfiles:
-    #     sys.stdout.write("%s\t%.6f"%(samfile,ff))
+    ffs=clf.predict(X)
+    if cmdline:
+        for smp,ff in zip(args.samfiles, ffs):
+            sys.stdout.write("%s\t%s\n"%(smp,ff))
+    else:
+        return ffs

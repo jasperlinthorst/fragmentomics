@@ -27,7 +27,6 @@ def dnase1l3(args):
     sys.stdout.write(f"R206C genotype prediction: {gt} (0={classp[0]:.2f},1={classp[1]:.2f},2={classp[2]:.2f})\tR206C homozygous vs WT: {b}\tDNASE1L3 plasma activity regression: {actreg:.3f}\n")
 
 
-
 def plot_fragmentome(args):
     
     from matplotlib import pyplot as plt
