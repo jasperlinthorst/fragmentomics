@@ -10,8 +10,7 @@ import pickle
 import base64
 from multiprocessing import Pool
 
-from cfstats import utils
-from cfstats import nipt, ff, bincounts, fszd, csm, delfi, fpends
+from cfstats import utils, nipt, ff, bincounts, fszd, csm, delfi, fpends, dnase1l3, ft
 
 parser = argparse.ArgumentParser(prog="cfstats", usage="cfstats -h", description="Gather cfDNA statistics", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
@@ -103,19 +102,18 @@ def main():
     parser_fourier = subparsers.add_parser('fourier', prog="cfstats fourier", description="Extract Fourier transformed coverage profile for each gene", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_fourier.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
     parser_fourier.add_argument('gfffile', help='GFF file with gene annotations')
-    parser_fourier.set_defaults(func=fourier_transform_coverage)
+    parser_fourier.set_defaults(func=ft.fourier_transform_coverage)
 
     parser_ff = subparsers.add_parser('ff', prog="cfstats ff", description="Estimate ff", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
-    parser_ff.add_argument('predictor', nargs='+', help='Regression model that can be used to predict the fetal fraction.')
+    parser_ff.add_argument('predictor', help='Regression model that can be used to predict the fetal fraction.')
     parser_ff.add_argument('samfiles', nargs='+', help='sam/bam/cram files for which ff should be predicted')
-    parser_ff.add_argument("--ff", dest="ff", type=float, default=0.10, help="Fetal fraction")
     parser_ff.set_defaults(func=ff.ff)
 
     parser_nipt = subparsers.add_parser('nipt', prog="cfstats nipt", description="Perform typical NIPT analysis", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
-    parser_nipt.add_argument('reference_folder', nargs='+', help='folder containing reference sam/bam/cram files')
-    parser_nipt.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
+    parser_nipt.add_argument('reference_folder', help='folder containing reference sam/bam/cram files')
+    parser_nipt.add_argument('samfiles', nargs='+', help='sam/bam/cram files')
     parser_nipt.add_argument("--ff", dest="ff", type=float, default=0.10, help="Fetal fraction")
-    parser_nipt.set_defaults(func=nipt.nipt)
+    parser_nipt.set_defaults(func=ff.ff)
 
     args = parser.parse_args()
 

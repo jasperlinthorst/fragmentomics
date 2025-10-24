@@ -6,3 +6,6 @@ cfstats.egg-info/PKG-INFO
 cfstats.egg-info/SOURCES.txt
 cfstats.egg-info/top_level.txt
 dist/cfstats-0.1-py3.7.egg
+build/*
+dist/*
+*.png
