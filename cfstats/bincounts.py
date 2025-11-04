@@ -8,13 +8,13 @@ from cfstats import utils
 from logging import log
 import numpy as np
 from multiprocessing import Pool
-
+import pandas as pd
 
 def worker_bincounts(pl):
     samfile,args=pl
 
     if args.reference==None:
-        parser.error("Reference file is required.")
+        args.parser.error("Reference file is required.")
 
     cram=pysam.AlignmentFile(samfile,reference_filename=args.reference)
     fasta=pysam.FastaFile(args.reference)
@@ -67,7 +67,7 @@ def bincounts(args, cmdline=True):
         results = pool.map(worker_bincounts, zip(args.samfiles, [args]*len(args.samfiles)))
 
     V=[]
-
+    
     for i,result in enumerate(results):
         samfile = result["samfile"]
         bins = result["d"]
@@ -77,6 +77,13 @@ def bincounts(args, cmdline=True):
             v+=list(bins[ref])
         
         v=np.array(v)
+
+        if args.gccorrect:
+            #gc correct
+            dfcnt=pd.DataFrame([v], columns=reflabels)
+            gc_content = utils.get_gc_content(dfcnt, args.reference)
+            dfcnt_corrected = utils.gc_correct_counts(dfcnt, gc_content)
+            v = dfcnt_corrected.iloc[0].values
 
         if not cmdline:
             V.append(v)

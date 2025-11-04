@@ -28,6 +28,7 @@ def ff(args, cmdline=True):
     args.header=True #we need to header to select the right features
     args.exclflag=1024
     args.mapqual=1
+    args.gccorrect=False
 
     columns, counts = bincounts.bincounts(args,cmdline=False)
     

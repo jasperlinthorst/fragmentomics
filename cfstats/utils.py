@@ -1,5 +1,9 @@
 from Bio import SeqIO
 from statsmodels.nonparametric.smoothers_lowess import lowess
+import pandas as pd
+import numpy as np
+import datetime
+import time
 
 revcomptable = str.maketrans("acgtACGTRY","tgcaTGCAYR")
 def revcomp(s):
@@ -36,7 +40,6 @@ def nuc2purpyr(s):
     n2p={'A':'R','G':'R','C':'Y','T':'Y'} #R=purine / Y=Pyrimidine
     return "".join([n2p[c] for c in s])
 
-
 def get_gc_content_from_fasta(fasta_path, chrom, start, end):
     # Load the chromosome sequence from the fasta file
     # Assumes chromosome names in fasta are like 'chr1', 'chr2', etc.
@@ -52,7 +55,7 @@ def get_gc_content_from_fasta(fasta_path, chrom, start, end):
     return gc
 
 # Parse columns and compute GC content for each bin
-def get_gc_content(dfcnt):
+def get_gc_content(dfcnt, reference):
     gc_content = []
     for col in dfcnt.columns:
         parts = col.split('_')
@@ -64,7 +67,7 @@ def get_gc_content(dfcnt):
         else:
             gc_content.append(np.nan)
             continue
-        gc = get_gc_content_from_fasta("hg38flat.fa", chrom, start, end)
+        gc = get_gc_content_from_fasta(reference, chrom, start, end)
         gc_content.append(gc)
 
     return pd.Series(gc_content, index=dfcnt.columns, name="gc_content")
