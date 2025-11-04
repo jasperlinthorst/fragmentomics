@@ -68,6 +68,7 @@ def main():
     parser_bincounts = subparsers.add_parser('bincounts',prog="cfstats bincounts", description="", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_bincounts.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
     parser_bincounts.add_argument("-b", "--binsize", dest="binsize", type=int, default=1000000, help="Size of the bins.")
+    parser_bincounts.add_argument("--gccorrect", dest="gccorrect", action="store_true", default=False, help="Apply GC content correction.")
     parser_bincounts.set_defaults(func=bincounts.bincounts)
 
     parser_fszd = subparsers.add_parser('fszd',prog="cfstats fszd", description="Extract fragment size distribution (only for paired-end data)", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
@@ -110,10 +111,12 @@ def main():
     parser_ff.set_defaults(func=ff.ff)
 
     parser_nipt = subparsers.add_parser('nipt', prog="cfstats nipt", description="Perform typical NIPT analysis", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
-    parser_nipt.add_argument('reference_folder', help='folder containing reference sam/bam/cram files')
-    parser_nipt.add_argument('samfiles', nargs='+', help='sam/bam/cram files')
-    parser_nipt.add_argument("--ff", dest="ff", type=float, default=0.10, help="Fetal fraction")
-    parser_nipt.set_defaults(func=ff.ff)
+    parser_nipt.add_argument('referencesamples', help='Tab-separated value list in which rows are samples and columns are bincounts (matched with specified bin size)')
+    parser_nipt.add_argument('samfiles', nargs='+', help='sam/bam/cram files for which gains or deletion should be called')
+    parser_nipt.add_argument("--ff", dest="ff", type=float, default=0.10, help="Global fetal fraction to use")
+    parser_nipt.add_argument("-b", "--binsize", dest="binsize", type=int, default=1000000, help="Size of the bins.")
+    parser_nipt.add_argument("--gccorrect", dest="gccorrect", action="store_true", default=False, help="Apply GC content correction before normalisation and calling")
+    parser_nipt.set_defaults(func=nipt.nipt)
 
     args = parser.parse_args()
 
