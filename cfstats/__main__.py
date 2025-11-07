@@ -75,7 +75,7 @@ def main():
     parser_fszd.add_argument('samfiles', nargs='*', help='sam/bam/cram file')
     parser_fszd.add_argument("--bamlist", dest="bamlist", type=str, default=None, help="File containing a list of sam/bam/cram files (one per line).")
     parser_fszd.add_argument('-l','--lower', default=60, type=int, help='Lower limit for fragments to report')
-    parser_fszd.add_argument('-u','--upper', default=600, type=int, help='Upper limit for fragments to report')
+    parser_fszd.add_argument('-u','--upper', default=1000, type=int, help='Upper limit for fragments to report')
     parser_fszd.add_argument("--noinsert", dest="insertissize", action="store_false", default=True, help="In case of long-read/unpaired sequencing infer fragmentsize from sequence instead of insert.")
     parser_fszd.set_defaults(func=fszd.fszd)
         

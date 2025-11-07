@@ -6,6 +6,7 @@ import datetime
 import time
 
 revcomptable = str.maketrans("acgtACGTRY","tgcaTGCAYR")
+
 def revcomp(s):
     return s.translate(revcomptable)[::-1]
 
