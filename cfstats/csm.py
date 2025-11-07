@@ -12,7 +12,7 @@ def worker_cleavesitemotifs(pl):
     cram = pysam.AlignmentFile(samfile, reference_filename=args.reference)
 
     if args.reference==None:
-        parser.error("Reference file is required.")
+        raise ValueError("Reference file is required.")
 
     cram=pysam.AlignmentFile(samfile,reference_filename=args.reference)
     fasta=pysam.FastaFile(args.reference)
@@ -109,7 +109,7 @@ def cleavesitemotifs_old(args, cmdline=True):
     
     for samfile in args.samfiles:
         if args.reference==None:
-            parser.error("Reference file is required.")
+            raise ValueError("Reference file is required.")
 
         cram=pysam.AlignmentFile(samfile,reference_filename=args.reference)
         fasta=pysam.FastaFile(args.reference)
@@ -186,8 +186,8 @@ def cleavesitemotifsbysize(args, cmdline=True):
     
     for samfile in args.samfiles:
         if args.reference==None:
-            parser.error("Reference file is required.")
-
+            raise ValueError("Reference file is required.")
+        
         cram=pysam.AlignmentFile(samfile,reference_filename=args.reference)
         fasta=pysam.FastaFile(args.reference)
         
