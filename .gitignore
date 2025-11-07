@@ -9,3 +9,6 @@ dist/cfstats-0.1-py3.7.egg
 build/*
 dist/*
 *.png
+tri.1M.tsv
+test.tsv
+data/reference.w1000000.q1.F1024.tsv
