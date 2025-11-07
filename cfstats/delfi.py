@@ -1,5 +1,7 @@
 import pysam
 import sys
+import numpy as np
+
 
 def delfi(args, cmdline=True):
 

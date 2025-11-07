@@ -1,11 +1,12 @@
 import pysam
 import random
 import sys
-import utils
+from cfstats import utils
 from logging import log
 import numpy as np
 from multiprocessing import Pool
 import pandas as pd
+
 
 def worker_cleavesitemotifs(pl):
     samfile,args=pl
@@ -20,9 +21,9 @@ def worker_cleavesitemotifs(pl):
     k=args.k
     
     if args.purpyr:
-        d={k:0 for k in allkp(k,onlylexsmallest=True)}
+        d={k:0 for k in utils.allkp(k,onlylexsmallest=True)}
     else:
-        d={k:0 for k in allk(k,onlylexsmallest=True)}        
+        d={k:0 for k in utils.allk(k,onlylexsmallest=True)}        
     
     if args.maxo!=None:
         total_mapped_reads = sum([int(l.split("\t")[2]) for l in pysam.idxstats(cram.filename).split("\n")[:-1]])
@@ -52,7 +53,7 @@ def worker_cleavesitemotifs(pl):
                 s=fasta.fetch(read.reference_name,int(read.reference_start-k/2),int(read.reference_start+k/2)).upper()
             if 'N' not in s:
                 try:
-                    rcs=s.translate(revcomptable)[::-1]
+                    rcs=s.translate(utils.revcomptable)[::-1]
 
                     if args.purpyr:
                         s=nuc2purpyr(s)
@@ -117,9 +118,9 @@ def cleavesitemotifs_old(args, cmdline=True):
         k=args.k
         
         if args.purpyr:
-            d={k:0 for k in allkp(k,onlylexsmallest=True)}
+            d={k:0 for k in utils.allkp(k,onlylexsmallest=True)}
         else:
-            d={k:0 for k in allk(k,onlylexsmallest=True)}        
+            d={k:0 for k in utils.allk(k,onlylexsmallest=True)}        
         
         if args.maxo!=None:
             total_mapped_reads = sum([int(l.split("\t")[2]) for l in pysam.idxstats(cram.filename).split("\n")[:-1]])
@@ -149,7 +150,7 @@ def cleavesitemotifs_old(args, cmdline=True):
                     s=fasta.fetch(read.reference_name,int(read.reference_start-k/2),int(read.reference_start+k/2)).upper()
                 if 'N' not in s:
                     try:
-                        rcs=s.translate(revcomptable)[::-1]
+                        rcs=s.translate(utils.revcomptable)[::-1]
 
                         if args.purpyr:
                             s=nuc2purpyr(s)
@@ -194,9 +195,9 @@ def cleavesitemotifsbysize(args, cmdline=True):
         k=args.k
         
         if args.purpyr:
-            d={k:{i:0 for i in range(args.lower,args.upper)} for k in allkp(k,onlylexsmallest=True)}
+            d={k:{i:0 for i in range(args.lower,args.upper)} for k in utils.allkp(k,onlylexsmallest=True)}
         else:
-            d={k:{i:0 for i in range(args.lower,args.upper)} for k in allk(k,onlylexsmallest=True)}        
+            d={k:{i:0 for i in range(args.lower,args.upper)} for k in utils.allk(k,onlylexsmallest=True)}        
         
         if args.maxo!=None:
             total_mapped_reads = sum([int(l.split("\t")[2]) for l in pysam.idxstats(cram.filename).split("\n")[:-1]])
@@ -227,7 +228,7 @@ def cleavesitemotifsbysize(args, cmdline=True):
                     s=fasta.fetch(read.reference_name,int(read.reference_start-k/2),int(read.reference_start+k/2)).upper()
                 if 'N' not in s:
                     try:
-                        rcs=s.translate(revcomptable)[::-1]
+                        rcs=s.translate(utils.revcomptable)[::-1]
 
                         if args.purpyr:
                             s=nuc2purpyr(s)
