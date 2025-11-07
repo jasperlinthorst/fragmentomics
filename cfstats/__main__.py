@@ -122,7 +122,10 @@ def main():
 
     if hasattr(args, 'func'):
         random.seed(args.seed)
-        args.func(args)
+        try:
+            args.func(args)
+        except Exception as e:
+            parser.error(str(e))
     else:
         parser.print_help()
 

@@ -7,7 +7,7 @@ def delfi(args, cmdline=True):
         cram=pysam.AlignmentFile(samfile,reference_filename=args.reference)
         
         if args.reference==None:
-            parser.error("Reference file is required.")
+            raise ValueError("Reference file is required.")
         
         fasta=pysam.FastaFile(args.reference)
 
