@@ -4,7 +4,7 @@ import pickle
 import numpy as np
 from cfstats import bincounts
 import sys
-
+from logging import log
 
 import warnings
 
@@ -30,7 +30,9 @@ def ff(args, cmdline=True):
     args.mapqual=1
     args.gccorrect=False
 
+    log(0,"Binning read counts...")
     columns, counts = bincounts.bincounts(args,cmdline=False)
+    log(0,"Binning done.")
     
     X=pd.DataFrame(counts,columns=columns)
     

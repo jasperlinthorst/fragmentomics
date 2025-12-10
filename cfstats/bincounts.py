@@ -14,7 +14,7 @@ def worker_bincounts(pl):
     samfile,args=pl
 
     if args.reference==None:
-        args.parser.error("Reference file is required.")
+        raise ValueError("Reference file is required.")
 
     cram=pysam.AlignmentFile(samfile,reference_filename=args.reference)
     fasta=pysam.FastaFile(args.reference)
@@ -50,7 +50,7 @@ def worker_bincounts(pl):
 
 def bincounts(args, cmdline=True):
     if args.reference==None:
-        parser.error("Reference file is required.")
+        raise ValueError("Reference file is required.")
     
     reflabels=[]
     #determine bin labels
