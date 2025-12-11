@@ -9,6 +9,7 @@ import sklearn
 import pickle
 import base64
 from multiprocessing import Pool
+import logging as log_module
 
 from cfstats import utils, nipt, ff, bincounts, fszd, csm, delfi, fpends, dnase1l3, ft
 
@@ -16,6 +17,13 @@ parser = argparse.ArgumentParser(prog="cfstats", usage="cfstats -h", description
 
 def main():
     global_parser = argparse.ArgumentParser(add_help=False) #parser for arguments that apply to all subcommands
+    
+    log = log_module
+    
+    global_parser.add_argument("--loglevel", dest="loglevel", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], default='WARNING', help="Log level")
+        
+    args, unknown_args = global_parser.parse_known_args()
+    log.basicConfig(level=getattr(log, args.loglevel))
 
     global_parser.add_argument("-f", dest="reqflag", default=None, type=int, help="Sam file filter flag: have all of the FLAGs present (like samtools -f option)")
     global_parser.add_argument("-F", dest="exclflag", default=3852, type=int, help="Sam file filter flag: have none of the FLAGs present (like samtools -F option, but exclude duplicates and unmapped read by default)")
@@ -119,6 +127,8 @@ def main():
     parser_nipt.set_defaults(func=nipt.nipt)
 
     args = parser.parse_args()
+
+    args.logger=log
 
     if hasattr(args, 'func'):
         random.seed(args.seed)
