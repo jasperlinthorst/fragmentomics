@@ -278,7 +278,7 @@ def fourier_transform_coverage(args):
                 if not header_written:
                     sys.stdout.write("#filename\t" + "\t".join(fft.keys()) + "\n")
                     header_written = True
-                sys.stdout.write("\t".join([samfile] + list(map(str, fft.values()))))
+                sys.stdout.write("\t".join([samfile] + list(map(str, fft.values())))+"\n")
     else:
         for samfile in args.samfiles:
             result = worker_fourier_transform_samfile((samfile, args))
@@ -288,4 +288,4 @@ def fourier_transform_coverage(args):
             if not header_written:
                 sys.stdout.write("#filename\t" + "\t".join(fft.keys()) + "\n")
                 header_written = True
-            sys.stdout.write("\t".join([samfile_out] + list(map(str, fft.values()))+"\n"))
+            sys.stdout.write("\t".join([samfile_out] + list(map(str, fft.values())))+"\n")
