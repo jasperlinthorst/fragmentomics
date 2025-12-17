@@ -110,6 +110,9 @@ def main():
     parser_fourier = subparsers.add_parser('fourier', prog="cfstats fourier", description="Extract Fourier transformed coverage profile for each gene", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_fourier.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
     parser_fourier.add_argument('gfffile', help='GFF file with gene annotations')
+    parser_fourier.add_argument('-w', dest='window', default=10000, help='Size of the gene body which whould be transformed')
+    parser_fourier.add_argument('--amplitude-min', dest='ampmin', default=193, help='Amplitude range over which mean is calculated')
+    parser_fourier.add_argument('--amplitude-max', dest='ampmax', default=199, help='Amplitude range over which mean is calculated')
     parser_fourier.set_defaults(func=ft.fourier_transform_coverage)
 
     parser_nucs = subparsers.add_parser('nucs', prog="cfstats nucs", description="Call nucleosomes from WPS profiles (region or genome-wide)", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
