@@ -8,104 +8,133 @@ import os
 from logging import log
 
 def wps(bam_file, chromosome, start_query, end_query, k=120, min_len=120, max_len=180):
-    """
-    Calculates the Windowed Protection Score (WPS) for every position in the query region
-    using a sliding window approach with aligned reads from a BAM file.
+    """Calculate the Windowed Protection Score (WPS) for a genomic region.
 
-    The window size k defaults to 120 bp (L-WPS), appropriate for nucleosome analysis 
-    using fragments in the 120–180 bp range [2].
+    This implementation uses difference arrays (prefix sums) so that WPS is
+    accumulated in a *single pass* over fragments, avoiding an explicit
+    fragments×positions nested loop.
+
+    The semantics are unchanged relative to the previous version:
+    - For each genomic position `g` in [start_query, end_query), we consider a
+      window `[g - k//2, g + k//2)`.
+    - `spanning_count(g)` is the number of fragments that *fully span* this
+      window.
+    - `endpoint_within_count(g)` is the number of fragment endpoints that fall
+      inside this window (counting at most two endpoints per fragment and
+      avoiding double counting single‑base fragments).
+    - `WPS(g) = spanning_count(g) - endpoint_within_count(g)`.
 
     Args:
-        bam_file_path (str): Path to the alignment file (BAM).
+        bam_file: pysam.AlignmentFile
         chromosome (str): Chromosome name (e.g., 'chr1').
-        start_query (int): Start coordinate of the query region (1-based inclusive).
-        end_query (int): End coordinate of the query region (1-based exclusive).
-        k (int): The window size k (120 for L-WPS, 16 for S-WPS) [2].
-        min_len (int): Minimum fragment length to consider (e.g., 120 for L-WPS).
-        max_len (int): Maximum fragment length to consider (e.g., 180 for L-WPS).
+        start_query (int): Start coordinate of the query region (0-based, inclusive).
+        end_query (int): End coordinate of the query region (0-based, exclusive).
+        k (int): Window size (120 for L-WPS, 16 for S-WPS, etc.).
+        min_len (int): Minimum fragment length to consider.
+        max_len (int): Maximum fragment length to consider.
 
     Returns:
-        numpy.ndarray: Array of WPS scores for each position in the query region.
+        numpy.ndarray: Array of WPS scores (length = end_query - start_query).
     """
-    
-    # Calculate the length of the query region
+
+    # Length of the query region
     region_length = end_query - start_query
-    
-    # Initialize result array
-    wps_scores = np.zeros(region_length, dtype=int)
-    
-    # Pre-fetch all relevant reads in the extended region
+    if region_length <= 0:
+        return np.array([], dtype=int)
+
+    # Difference arrays for efficient accumulation
+    # span_diff: prefix-sum gives number of fragments that fully span the window
+    # end_diff:  prefix-sum gives number of endpoints that fall within the window
+    span_diff = np.zeros(region_length + 1, dtype=int)
+    end_diff = np.zeros(region_length + 1, dtype=int)
+
+    # We need to fetch reads in an extended region to allow windows near the
+    # edges to be fully evaluated.
     fetch_start = max(0, start_query - k)
     fetch_end = end_query + k
-    
-    # Store fragment information for efficient processing
-    fragments = []
-    
+
     try:
-        # Iterate over all reads overlapping the extended region
         for read in bam_file.fetch(chromosome, fetch_start, fetch_end):
-            
-            # We only process the first read in a pair to avoid double counting fragments
-            # and must ensure the read is properly paired and mapped.
-            if read.is_paired and read.is_proper_pair and read.is_read1:
-                
-                # Get fragment length (template length, tlen)
-                template_length = abs(read.template_length)
-                
-                # Filter reads based on length criteria (e.g., 120-180 bp for L-WPS)
-                if template_length < min_len or template_length > max_len:
-                    continue
-                
-                # Determine fragment coordinates for paired reads
-                # Use template_length which represents the insert size (distance from start of read1 to end of read2)
-                # For properly paired reads, the fragment spans from the leftmost alignment to the rightmost alignment
-                if read.template_length > 0:
-                    # Read1 is leftmost, read2 is rightmost
-                    frag_start = read.reference_start
-                    frag_end = read.reference_start + read.template_length
-                else:
-                    # Read1 is rightmost, read2 is leftmost
-                    frag_start = read.reference_start + read.template_length  # template_length is negative
-                    frag_end = read.reference_start
-                
-                fragments.append((frag_start, frag_end))
-                        
+            # Only use properly paired read1 to represent a fragment
+            if not (read.is_paired and read.is_proper_pair and read.is_read1):
+                continue
+
+            template_length = abs(read.template_length)
+            if template_length < min_len or template_length > max_len:
+                continue
+
+            # Derive fragment coordinates [frag_start, frag_end) in reference
+            if read.template_length > 0:
+                frag_start = read.reference_start
+                frag_end = read.reference_start + read.template_length
+            else:
+                frag_start = read.reference_start + read.template_length
+                frag_end = read.reference_start
+
+            # Skip fragments that do not overlap the broader region at all
+            if frag_end <= fetch_start or frag_start >= fetch_end:
+                continue
+
+            # --- 1. Fragments that COMPLETELY SPAN the window ---
+            # For a fragment [frag_start, frag_end), a window centered at g
+            # with bounds [g - k//2, g + k//2) is fully spanned when:
+            #   frag_start <= g - k//2  and  frag_end >= g + k//2
+            # => g >= frag_start + k//2  and  g <= frag_end - k//2
+            g_start_span = frag_start + k // 2
+            g_end_span = frag_end - k // 2
+
+            # Convert to index space of the query region (0..region_length-1)
+            i_start_span = g_start_span - start_query
+            i_end_span = g_end_span - start_query
+
+            # Clip to valid index range
+            if i_end_span < 0 or i_start_span > region_length - 1:
+                pass  # No contribution inside query region
+            else:
+                i_start_span = max(0, i_start_span)
+                i_end_span = min(region_length - 1, i_end_span)
+                if i_start_span <= i_end_span:
+                    span_diff[i_start_span] += 1
+                    span_diff[i_end_span + 1] -= 1
+
+            # --- 2. Fragments with an ENDPOINT WITHIN the window ---
+            # For an endpoint at position p (0-based), we count windows for
+            # which [g - k//2, g + k//2) contains p:
+            #   g - k//2 <= p < g + k//2
+            # => g > p - k//2  and  g <= p + k//2
+            # Integer g satisfy: g in [p - k//2 + 1, p + k//2].
+
+            def _add_endpoint(p):
+                g_min = p - k // 2 + 1
+                g_max = p + k // 2
+                i_start = g_min - start_query
+                i_end = g_max - start_query
+
+                if i_end < 0 or i_start > region_length - 1:
+                    return
+                i_start = max(0, i_start)
+                i_end = min(region_length - 1, i_end)
+                if i_start <= i_end:
+                    end_diff[i_start] += 1
+                    end_diff[i_end + 1] -= 1
+
+            # Fragment start endpoint
+            _add_endpoint(frag_start)
+
+            # Fragment end endpoint (frag_end - 1), avoiding double counting
+            if frag_start != frag_end - 1:
+                _add_endpoint(frag_end - 1)
+
     except Exception as e:
         print(f"Error processing BAM file: {e}")
         return np.full(region_length, np.nan)
-    
-    # Calculate WPS for each position using sliding window
-    for pos in range(region_length):
-        # Convert to 0-based genomic coordinates
-        genomic_pos = start_query + pos
-        
-        # Define window boundaries (0-based inclusive, exclusive)
-        start_window = genomic_pos - k // 2
-        end_window = genomic_pos + k // 2
-        
-        spanning_count = 0
-        endpoint_within_count = 0
-        
-        # Count fragments for this window
-        for frag_start, frag_end in fragments:
-            # Check for Fragments COMPLETELY SPANNING the window
-            if (frag_start <= start_window) and (frag_end >= end_window):
-                spanning_count += 1
-            
-            # Check for Fragments with an ENDPOINT WITHIN the window
-            # Check fragment start endpoint
-            if (frag_start >= start_window) and (frag_start < end_window):
-                endpoint_within_count += 1
-            
-            # Check fragment end endpoint
-            if (frag_end - 1 >= start_window) and (frag_end - 1 < end_window):
-                # Ensure we don't double count single-base fragments
-                if frag_start != (frag_end - 1):
-                    endpoint_within_count += 1
-        
-        # Calculate WPS for this position
-        wps_scores[pos] = spanning_count - endpoint_within_count
-    
+
+    # Accumulate counts via prefix sums
+    spanning_count = np.cumsum(span_diff[:-1])
+    endpoint_count = np.cumsum(end_diff[:-1])
+
+    # WPS = fragments that span the window minus endpoints within the window
+    wps_scores = spanning_count - endpoint_count
     return wps_scores
 
 def fourier_transform_coverage(args):

@@ -11,7 +11,7 @@ import base64
 from multiprocessing import Pool
 import logging as log_module
 
-from cfstats import utils, nipt, ff, bincounts, fszd, csm, delfi, fpends, dnase1l3, ft
+from cfstats import utils, nipt, ff, bincounts, fszd, csm, delfi, fpends, dnase1l3, ft, nucs
 
 parser = argparse.ArgumentParser(prog="cfstats", usage="cfstats -h", description="Gather cfDNA statistics", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
@@ -31,7 +31,6 @@ def main():
     global_parser.add_argument("-x", dest="x", default=1000000, type=int, help="Normalisation unit, see norm")
     global_parser.add_argument("--nproc", dest="nproc", default=1, type=int, help="Number of parallel processes to use.")
     global_parser.add_argument("--norm", dest="norm", choices=['counts','freq','rpx'], default='counts', help="Normalize: report counts, frequencies or reads per X reads (default x=1000000, set X with -x option).")
-
     global_parser.add_argument("-o", dest="maxo", default=None, type=int, help="Limit stats to maxo observations.")
     global_parser.add_argument("--header", dest="header", action="store_true", default=False, help="Write header for names of features")
     global_parser.add_argument("--noname", dest="name", action="store_false", default=True, help="Do not prefix tab-separated values with the name of the file")
@@ -112,6 +111,18 @@ def main():
     parser_fourier.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
     parser_fourier.add_argument('gfffile', help='GFF file with gene annotations')
     parser_fourier.set_defaults(func=ft.fourier_transform_coverage)
+
+    parser_nucs = subparsers.add_parser('nucs', prog="cfstats nucs", description="Call nucleosomes from WPS profiles (region or genome-wide)", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
+    parser_nucs.add_argument('samfiles', nargs='+', help='sam/bam/cram file(s)')
+    parser_nucs.add_argument('--chrom', dest='chrom', default=None, help='Chromosome name (e.g. chr1). If omitted, scan all contigs.')
+    parser_nucs.add_argument('--start', dest='start', type=int, default=None, help='Start coordinate (0-based, inclusive). If omitted, start at 0 for the chromosome.')
+    parser_nucs.add_argument('--end', dest='end', type=int, default=None, help='End coordinate (0-based, exclusive). If omitted, use end of chromosome.')
+    parser_nucs.add_argument('-k', dest='k', type=int, default=120, help='WPS window size (bp)')
+    parser_nucs.add_argument('--min-len', dest='min_len', type=int, default=120, help='Minimum fragment length to include')
+    parser_nucs.add_argument('--max-len', dest='max_len', type=int, default=180, help='Maximum fragment length to include')
+    parser_nucs.add_argument('--min-prominence', dest='min_prominence', type=float, default=5.0, help='Minimum WPS peak prominence for nucleosome calling')
+    parser_nucs.add_argument('--min-distance', dest='min_distance', type=int, default=147, help='Minimum distance between nucleosome peaks (bp)')
+    parser_nucs.set_defaults(func=nucs.nucs)
 
     parser_ff = subparsers.add_parser('ff', prog="cfstats ff", description="Estimate ff", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_ff.add_argument('predictor', help='Regression model that can be used to predict the fetal fraction.')
