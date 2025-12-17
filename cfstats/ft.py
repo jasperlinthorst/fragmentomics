@@ -6,6 +6,7 @@ from scipy.signal import periodogram
 from scipy.interpolate import interp1d
 import os
 from logging import log
+import sys
 
 def wps(bam_file, chromosome, start_query, end_query, k=120, min_len=120, max_len=180):
     """Calculate the Windowed Protection Score (WPS) for a genomic region.
@@ -139,12 +140,13 @@ def wps(bam_file, chromosome, start_query, end_query, k=120, min_len=120, max_le
 
 def fourier_transform_coverage(args):
 
-    for samfile in args.samfiles:
+    for si,samfile in enumerate(args.samfiles):
         # Open the SAM/BAM/CRAM file
         pysamfile = pysam.AlignmentFile(samfile, "rb", reference_filename=args.reference if args.reference!=None else None)
         samctgs=set([ctg for ctg in pysamfile.references])
         # pysamfile.close()
-
+        mean_intensities=[]
+        genes=[]
         # Load the GFF file
         db_filename = f'{args.gfffile}.db'
         if not os.path.exists(db_filename):
@@ -172,14 +174,18 @@ def fourier_transform_coverage(args):
                 chrom=gene.chrom
             
             if gene.strand=='-':
-                start=gene.end-10000
+                start=gene.end-int(args.window)
                 end=gene.end
             else:
                 start=gene.start
-                end=gene.start+10000
-
+                end=gene.start+int(args.window)
+            
             args.logger.debug(f"Start WPS calculation for: {chrom}:{start}-{end}")
             signal = wps(pysamfile, chrom, start, end)
+            
+            #TODO: check if below works better
+            #if gene.strand=='-':
+            #    signal=signal[::-1]
 
             args.logger.debug("WPS done.")
 
@@ -212,8 +218,8 @@ def fourier_transform_coverage(args):
             # NOTE: The intensity value is the amplitude/power at a given frequency.
 
             # Define the specific range for correlation analysis (193-199 bp)
-            P_MIN = 193
-            P_MAX = 199
+            P_MIN = args.ampmin#193
+            P_MAX = args.ampmax#199
 
             # Interpolate the periodogram to get a smoother curve (as required by sources)
             # and evaluate intensity at points between P_MIN and P_MAX.
@@ -231,10 +237,13 @@ def fourier_transform_coverage(args):
 
             # --- 4. Calculate Mean Intensity (The value that corresponds to 'intensity') ---
             # The mean intensity in the 193-199 bp range is the core value used for correlation.
-            mean_intensity_193_199 = np.mean(intensity_at_fine_periods)
-
-            # Print or save the Fourier transformed coverage profile
+            mean_intensities.append(np.mean(intensity_at_fine_periods))
             name=gene.attributes["gene_name"][0] if "gene_name" in gene.attributes else gene.attributes["gene_id"][0]
-            print(f"{name}\t{mean_intensity_193_199}")
+            
+            genes.append(name)
+
+        if si==0:
+            sys.stdout.write("#%s\n"%"\t".join(["Filename"]+genes))
+        sys.stdout.write("%.8f"%"\t".join(mean_intensities))
         
         pysamfile.close()
