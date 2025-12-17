@@ -142,8 +142,6 @@ def main():
 
     args = parser.parse_args()
 
-    args.logger=log
-
     if hasattr(args, 'func'):
         random.seed(args.seed)
         try:

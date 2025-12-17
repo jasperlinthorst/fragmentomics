@@ -1,3 +1,4 @@
+from itertools import starmap
 import numpy as np
 import pysam
 import gffutils
@@ -5,8 +6,10 @@ from scipy.fft import fft, fftfreq
 from scipy.signal import periodogram
 from scipy.interpolate import interp1d
 import os
-from logging import log
 import sys
+from multiprocessing import Pool
+import logging as log_module
+
 
 def wps(bam_file, chromosome, start_query, end_query, k=120, min_len=120, max_len=180):
     """Calculate the Windowed Protection Score (WPS) for a genomic region.
@@ -138,11 +141,18 @@ def wps(bam_file, chromosome, start_query, end_query, k=120, min_len=120, max_le
     wps_scores = spanning_count - endpoint_count
     return wps_scores
 
-def fourier_transform_coverage(args):
+def worker_fourier_transform_samfile(pl):
+    import traceback, sys
 
-    for si,samfile in enumerate(args.samfiles):
+    try:
+        samfile, args = pl
+
+        logger = log_module.getLogger("cfstats.fourier")
+
+        logger.debug(f"Processing samfile {samfile}")
+
         # Open the SAM/BAM/CRAM file
-        pysamfile = pysam.AlignmentFile(samfile, "rb", reference_filename=args.reference if args.reference!=None else None)
+        pysamfile = pysam.AlignmentFile(samfile, "rb", reference_filename=args.reference if args.reference is not None else None)
         samctgs=set([ctg for ctg in pysamfile.references])
         # pysamfile.close()
         mean_intensities=[]
@@ -150,13 +160,13 @@ def fourier_transform_coverage(args):
         # Load the GFF file
         db_filename = f'{args.gfffile}.db'
         if not os.path.exists(db_filename):
-            args.logger.info("Constructing gene DB...")
+            logger.info("Constructing gene DB...")
             db = gffutils.create_db(args.gfffile, dbfn=db_filename, force=True, keep_order=True, merge_strategy='merge', sort_attribute_values=True)
-            args.logger.info("Done.")
+            logger.info("Done.")
         else:
-            args.logger.debug("Loading gene DB...")
+            logger.debug(f"Loading gene DB: {db_filename}")
             db = gffutils.FeatureDB(db_filename, keep_order=True)
-            args.logger.debug("Done.")
+            logger.debug("Done.")
         
         # Iterate over each gene in the GFF file
         for gene in db.features_of_type('gene'):
@@ -168,7 +178,7 @@ def fourier_transform_coverage(args):
                 if 'chr'+gene.chrom in samctgs:
                     chrom='chr'+gene.chrom
                 else:
-                    args.logger.debug(f'{gene.chrom} not in samfile, skipping {gene}.')
+                    logger.debug(f"{gene.chrom} not in samfile, skipping {gene}.")
                     continue
             else:
                 chrom=gene.chrom
@@ -180,14 +190,14 @@ def fourier_transform_coverage(args):
                 start=gene.start
                 end=gene.start+int(args.window)
             
-            args.logger.debug(f"Start WPS calculation for: {chrom}:{start}-{end}")
+            logger.debug(f"Start WPS calculation for: {chrom}:{start}-{end}")
             signal = wps(pysamfile, chrom, start, end)
             
             #TODO: check if below works better
             #if gene.strand=='-':
             #    signal=signal[::-1]
 
-            args.logger.debug("WPS done.")
+            logger.debug("WPS done.")
 
             # for read in pysamfile.fetch(chrom, start, end):
             #     for ref_pos in read.get_reference_positions():
@@ -200,9 +210,9 @@ def fourier_transform_coverage(args):
             
             # signal = coverage
             # print(signal)
-            args.logger.debug(f"Doing fft...")
+            logger.debug(f"Doing fft...")
             frequencies, power_spectrum = periodogram(signal, fs=1, scaling='spectrum')
-            args.logger.debug("Done.")
+            logger.debug("Done.")
 
             periods = 1 / frequencies[1:]
             intensity = power_spectrum[1:]
@@ -218,22 +228,22 @@ def fourier_transform_coverage(args):
             # NOTE: The intensity value is the amplitude/power at a given frequency.
 
             # Define the specific range for correlation analysis (193-199 bp)
-            P_MIN = args.ampmin#193
-            P_MAX = args.ampmax#199
+            P_MIN = args.ampmin
+            P_MAX = args.ampmax
 
             # Interpolate the periodogram to get a smoother curve (as required by sources)
             # and evaluate intensity at points between P_MIN and P_MAX.
             # We invert the periods for consistent indexing if needed, but here we interpolate directly.
-            args.logger.debug("Interpolating...")
+            logger.debug("Interpolating...")
             interpolation_function = interp1d(target_periods, target_intensity)
-            args.logger.debug("Done.")
+            logger.debug("Done.")
             
             # Create a fine array of periods in the target range
-            args.logger.debug("Creating fine periods...")
+            logger.debug("Creating fine periods...")
             fine_periods = np.linspace(P_MIN, P_MAX, 100)
             # Calculate the intensity at these fine points
             intensity_at_fine_periods = interpolation_function(fine_periods)
-            args.logger.debug("Done.")
+            logger.debug("Done.")
 
             # --- 4. Calculate Mean Intensity (The value that corresponds to 'intensity') ---
             # The mean intensity in the 193-199 bp range is the core value used for correlation.
@@ -242,8 +252,40 @@ def fourier_transform_coverage(args):
             
             genes.append(name)
 
-        if si==0:
-            sys.stdout.write("#%s\n"%"\t".join(["Filename"]+genes))
-        sys.stdout.write("%.8f"%"\t".join(mean_intensities))
-        
-        pysamfile.close()
+        return {'samfile': samfile, 'fft':{g:i for g,i in zip(genes, mean_intensities)}}
+
+    except Exception as e:
+        print("WORKER EXCEPTION:", e, file=sys.stderr)
+        traceback.print_exc()
+        raise
+
+def fourier_transform_coverage(args):
+    
+    logger = log_module.getLogger("cfstats.fourier")
+    logger.debug("test")
+
+    header_written = False
+
+    if args.nproc > 1:
+        with Pool(args.nproc) as pool:
+            for result in pool.imap_unordered(
+                worker_fourier_transform_samfile,
+                zip(args.samfiles, [args] * len(args.samfiles)),
+            ):
+                samfile = result["samfile"]
+                fft = result["fft"]
+
+                if not header_written:
+                    sys.stdout.write("#filename\t" + "\t".join(fft.keys()) + "\n")
+                    header_written = True
+                sys.stdout.write("\t".join([samfile] + list(map(str, fft.values()))))
+    else:
+        for samfile in args.samfiles:
+            result = worker_fourier_transform_samfile((samfile, args))
+            samfile_out = result["samfile"]
+            fft = result["fft"]
+
+            if not header_written:
+                sys.stdout.write("#filename\t" + "\t".join(fft.keys()) + "\n")
+                header_written = True
+            sys.stdout.write("\t".join([samfile_out] + list(map(str, fft.values()))+"\n"))
