@@ -84,10 +84,7 @@ def fszd(args, cmdline=True):
                 sys.stdout.write(samfile + "\t")
             sys.stdout.write("\t".join(map(str, v)) + "\n")
     if not cmdline:
-        if len(V)==1:
-            return V[0]
-        else:
-            return V
+        return V
 
 def fszd_old(args, cmdline=True):
     
