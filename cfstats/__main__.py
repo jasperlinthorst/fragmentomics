@@ -11,7 +11,7 @@ import base64
 from multiprocessing import Pool
 import logging as log_module
 
-from cfstats import utils, nipt, ff, bincounts, fszd, csm, delfi, fpends, dnase1l3, ft, nucs
+from cfstats import utils, nipt, ff, bincounts, fszd, csm, delfi, fpends, dnase1l3, ft, nucs, fragmentome
 
 parser = argparse.ArgumentParser(prog="cfstats", usage="cfstats -h", description="Gather cfDNA statistics", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
@@ -139,6 +139,11 @@ def main():
     parser_nipt.add_argument("-b", "--binsize", dest="binsize", type=int, default=1000000, help="Size of the bins.")
     parser_nipt.add_argument("--gccorrect", dest="gccorrect", action="store_true", default=False, help="Apply GC content correction before normalisation and calling")
     parser_nipt.set_defaults(func=nipt.nipt)
+
+    parser_fragmentome = subparsers.add_parser('fragmentome', prog="cfstats fragmentome", description="Start interactive fragmentome explorer web application", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
+    parser_fragmentome.add_argument('meta', help='Tab-separated value list, first column is sample identifier (index), additional columns indicate arbitrary sample characteristics for filtering, coloring, etc.')
+    parser_fragmentome.add_argument('core', help='Tab-separated value list, first column is sample identifier (index), additional rows are cfstats fszd, 5pends, csm.')
+    parser_fragmentome.set_defaults(func=fragmentome.explore)
 
     args = parser.parse_args()
 
