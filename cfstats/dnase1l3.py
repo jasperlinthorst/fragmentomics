@@ -69,6 +69,11 @@ def plot_fragmentome(args):
     fp=reducer.transform(f)
     print(fp)
 
+    #import matplotlib.image as mpimg
+    #img=mpimg.imread("UMAP_background_scatter.png")
+    #(reducer,xlim,ylim)=pickle.load(open("UMAP.pll", 'rb'))
+    #plt.imshow(img,extent=[xlim[0],xlim[1],ylim[0],ylim[1]],aspect='auto',origin='upper')
+
     plt.scatter(embedding[:,0],embedding[:,1],c='blue',s=5,alpha=0.5)
     plt.scatter(fp[:,0],fp[:,1],c='red',s=10,alpha=1)
     # plt.show()
@@ -77,7 +82,7 @@ def plot_fragmentome(args):
             args.outfile=os.path.basename(args.samfiles[0]).rstrip('cram').rstrip('bam').rstrip('sam')+"fragmentome.png"
         else:
             import uuid
-            args.outfile=uuid.uuid4().hex[:8]+"fragmentome.png"
+            args.outfile=uuid.uuid4().hex[:8]+".fragmentome.png"
 
     sys.stderr.write(f"Writing fragmentome plot to: {args.outfile}")
     plt.savefig(args.outfile)

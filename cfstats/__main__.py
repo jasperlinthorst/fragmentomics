@@ -73,7 +73,8 @@ def main():
     parser_5pendsbsz.set_defaults(func=fpends._5pendsbysize)
 
     parser_bincounts = subparsers.add_parser('bincounts',prog="cfstats bincounts", description="", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
-    parser_bincounts.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
+    parser_bincounts.add_argument('samfiles', nargs='*', help='sam/bam/cram file')
+    parser_bincounts.add_argument("--bamlist", dest="bamlist", type=str, default=None, help="File containing a list of sam/bam/cram files (one per line).")
     parser_bincounts.add_argument("-b", "--binsize", dest="binsize", type=int, default=1000000, help="Size of the bins.")
     parser_bincounts.add_argument("--gccorrect", dest="gccorrect", action="store_true", default=False, help="Apply GC content correction.")
     parser_bincounts.set_defaults(func=bincounts.bincounts)
