@@ -51,7 +51,11 @@ def worker_bincounts(pl):
 def bincounts(args, cmdline=True):
     if args.reference==None:
         raise ValueError("Reference file is required.")
-    
+
+    if args.bamlist!=None:
+        with open(args.bamlist) as f:
+            args.samfiles = args.samfiles+[l.strip() for l in f.readlines()]
+
     reflabels=[]
     #determine bin labels
     fasta=pysam.FastaFile(args.reference)
