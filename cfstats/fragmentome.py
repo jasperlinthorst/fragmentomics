@@ -1,11 +1,18 @@
 import pandas as pd 
+import base64
+import copy
+import os
+import pickle
+import tempfile
+
 import dash
 from dash import dcc, html
 from dash.dependencies import Input, Output, State
 import plotly.express as px
 import plotly.graph_objects as go
-import pandas as pd
-from dash.exceptions import PreventUpdate
+import numpy as np
+
+from cfstats import fszd, csm, fpends
 
 # Example dataframe
 # df = pd.read_csv(...)
@@ -17,6 +24,13 @@ def explore(args):
     dfmeta = pd.read_csv(args.meta, sep='\t')
     dfmeta = dfmeta.drop_duplicates(subset='filename').set_index('filename')
     dfmeta['_sample_id'] = dfmeta.index.astype(str)
+
+    mapping = None
+    if getattr(args, 'mapping', None):
+        mapping = pickle.load(open(args.mapping, 'rb'))
+        reducer = mapping[0]
+        embedding = mapping[1]
+        mapping_k = mapping[2]
 
     color_columns = []
     
@@ -53,12 +67,30 @@ def explore(args):
         html.H3("Fragmentome explorer"),
 
         dcc.Store(id='selected-sample', data=None),
+        dcc.Store(id='uploaded-point', data=None),
         
         dcc.Loading(
             id="loading-icon",
             children=[html.Div(id='loading-status', children="Ready", style={'padding': '10px', 'color': 'green'})],
             type="default"
         ),
+
+        dcc.Upload(
+            id='upload-alignment',
+            children=html.Div(['Drag and Drop or ', html.A('Select BAM/SAM/CRAM')]),
+            style={
+                'width': '100%',
+                'height': '60px',
+                'lineHeight': '60px',
+                'borderWidth': '1px',
+                'borderStyle': 'dashed',
+                'borderRadius': '5px',
+                'textAlign': 'center',
+                'margin': '10px'
+            },
+            multiple=False
+        ),
+        html.Div(id='upload-status', style={'padding': '0px 10px 10px 10px'}),
 
         html.Div([
             html.Div([
@@ -126,6 +158,77 @@ def explore(args):
     ])
 
     @app.callback(
+        Output('uploaded-point', 'data'),
+        Output('upload-status', 'children'),
+        Input('upload-alignment', 'contents'),
+        State('upload-alignment', 'filename')
+    )
+    def handle_alignment_upload(contents, filename):
+        if contents is None:
+            return None, ''
+
+        if mapping is None:
+            return None, 'Upload disabled: start the app with --mapping <mapping.pkl> so I can compute x/y coordinates.'
+
+        if args.reference is None:
+            return None, 'Upload disabled: provide --reference <fasta> (required for motif features).' 
+
+        try:
+            header, b64data = contents.split(',', 1)
+            data = base64.b64decode(b64data)
+        except Exception:
+            return None, 'Upload failed: could not decode file contents.'
+
+        ext = ''
+        if filename:
+            ext = os.path.splitext(filename)[1]
+        if ext.lower() not in ['.bam', '.sam', '.cram']:
+            return None, f'Upload failed: unsupported file type {ext}. Please upload .bam, .sam, or .cram.'
+
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+                tmp.write(data)
+                tmp_path = tmp.name
+
+            upload_args = copy.copy(args)
+            upload_args.samfiles = [tmp_path]
+            upload_args.bamlist = None
+            upload_args.k = int(mapping_k)
+            upload_args.norm = 'freq'
+            upload_args.exclflag = 3852
+            upload_args.mapqual = 60
+            upload_args.purpyr = False
+            upload_args.uselexsmallest = False
+            upload_args.useref = False
+            upload_args.insertissize = True
+            upload_args.lower = 0
+            upload_args.upper = 1000
+
+            Xfszd = np.array(fszd.fszd(upload_args, cmdline=False))
+            Xcsm = np.array(csm.cleavesitemotifs(upload_args, cmdline=False))
+            Xsem = np.array(fpends._5pends(upload_args, cmdline=False))
+            f = np.concatenate((Xfszd, Xcsm, Xsem), axis=1)
+            fp = reducer.transform(f)
+
+            x_new = float(fp[0, 0])
+            y_new = float(fp[0, 1])
+            label = filename if filename else os.path.basename(tmp_path)
+
+            return {
+                'x': x_new,
+                'y': y_new,
+                'label': label,
+            }, f'Uploaded: {label} (x={x_new:.3f}, y={y_new:.3f})'
+        except Exception as e:
+            return None, f'Upload failed: {str(e)}'
+        finally:
+            try:
+                if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+
+    @app.callback(
         Output('selected-sample', 'data'),
         Input('scatter-plot', 'clickData')
     )
@@ -168,10 +271,11 @@ def explore(args):
         Input('color-dropdown', 'value'),
         Input('filter-dropdown', 'value'),
         Input('filter-range', 'value'),
-        Input('selected-sample', 'data')
+        Input('selected-sample', 'data'),
+        Input('uploaded-point', 'data')
     )
 
-    def update_figure(selected_color, filter_column, filter_range, selected_sample):
+    def update_figure(selected_color, filter_column, filter_range, selected_sample, uploaded_point):
         # Start with full dataframe
         df_filtered = dfmeta.copy()
         
@@ -254,6 +358,18 @@ def explore(args):
                     ),
                     showlegend=False,
                     hoverinfo='skip'
+                )
+            )
+
+        if uploaded_point is not None and 'x' in uploaded_point and 'y' in uploaded_point:
+            fig.add_trace(
+                go.Scatter(
+                    x=[uploaded_point['x']],
+                    y=[uploaded_point['y']],
+                    mode='markers',
+                    marker=dict(size=14, symbol='x', color='black', line=dict(color='black', width=2)),
+                    name='Uploaded sample',
+                    hovertemplate=f"{uploaded_point.get('label','Uploaded')}<br>x=%{{x:.3f}}<br>y=%{{y:.3f}}<extra></extra>",
                 )
             )
 
