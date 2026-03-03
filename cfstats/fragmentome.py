@@ -15,46 +15,30 @@ import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 
-from cfstats import fszd, csm, fpends
+from cfstats import fszd, csm, fpends, db
 
 # Example dataframe
 # df = pd.read_csv(...)
 # Must contain columns: 'x', 'y'
 
-def explore(args):
-
-    dfcore = pd.read_csv(args.core, sep='\t', index_col=0)
-
-    dfmeta = pd.read_csv(args.meta, sep='\t')
-    dfmeta = dfmeta.drop_duplicates(subset='filename').set_index('filename')
-    dfcore.index = dfcore.index.astype(str)
-    dfmeta.index = dfmeta.index.astype(str)
+def _prepare_meta(dfmeta):
+    """Prepare meta DataFrame for the UI: categorize low-cardinality columns, extract color/numeric columns."""
     dfmeta['_sample_id'] = dfmeta.index
-
     numeric_columns = [c for c in dfmeta.columns if pd.api.types.is_numeric_dtype(dfmeta[c])]
-    default_x_col = None
-    default_y_col = None
-
-    mapping = None
-    if getattr(args, 'mapping', None):
-        mapping = pickle.load(open(args.mapping, 'rb'))
-        reducer = mapping[0]
-        embedding = mapping[1]
-        mapping_k = mapping[2]
-
     color_columns = []
-    
     # Convert float64 columns to int when possible and distinct values ≤ 25
     for col in dfmeta.select_dtypes(include=['float64', 'int64', 'object']).columns:
         if col in ['x', 'y']:
             continue
         distinct_vals = dfmeta[col].dropna().unique()
         if len(distinct_vals) <= 25:
-            # # Check if all values are integers (no decimal part)
-            # if all(val.is_integer() for val in distinct_vals):
             dfmeta[col] = dfmeta[col].astype(str)  # nullable integer type
         color_columns.append(col)
+    return dfmeta, numeric_columns, color_columns
 
+
+def _prepare_core(dfcore):
+    """Extract core, csm, and 5p column groups from the core DataFrame."""
     core_cols = []
     for c in dfcore.columns:
         try:
@@ -66,24 +50,51 @@ def explore(args):
     core_cols.sort(key=lambda t: t[0])
     core_x = [t[0] for t in core_cols]
     core_col_names = [t[1] for t in core_cols]
-
-    dfcore_values = dfcore[core_col_names].apply(pd.to_numeric, errors='coerce') if core_col_names else pd.DataFrame(index=dfcore.index)
-    core_mean = dfcore_values.mean(axis=0) if not dfcore_values.empty else pd.Series(dtype=float)
-    core_std = dfcore_values.std(axis=0) if not dfcore_values.empty else pd.Series(dtype=float)
-
     csm_col_names = [c for c in dfcore.columns if str(c).endswith('-csm')]
     csm_x = [str(c)[:-4] for c in csm_col_names]
-
     p5_col_names = [c for c in dfcore.columns if str(c).endswith('-5p')]
     p5_x = [str(c)[:-3] for c in p5_col_names]
+    return core_x, core_col_names, csm_col_names, csm_x, p5_col_names, p5_x
+
+
+def explore(args):
+
+    ch_client = db.get_client(
+        host=getattr(args, 'ch_host', 'localhost'),
+        port=getattr(args, 'ch_port', 8123)
+    )
+
+    dfcore = db.load_core_df(ch_client)
+    dfmeta = db.load_meta_df(ch_client)
+
+    has_data = not dfcore.empty and not dfmeta.empty
+
+    if has_data:
+        dfmeta, numeric_columns, color_columns = _prepare_meta(dfmeta)
+        core_x, core_col_names, csm_col_names, csm_x, p5_col_names, p5_x = _prepare_core(dfcore)
+    else:
+        numeric_columns = []
+        color_columns = []
+        core_x, core_col_names, csm_col_names, csm_x, p5_col_names, p5_x = [], [], [], [], [], []
+
+    default_x_col = None
+    default_y_col = None
+
+    mapping = None
+    if getattr(args, 'mapping', None):
+        mapping = pickle.load(open(args.mapping, 'rb'))
+        reducer = mapping[0]
+        embedding = mapping[1]
+        mapping_k = mapping[2]
     
-    app = dash.Dash("Fragmentome explorer")
+    app = dash.Dash("Fragmentome explorer", suppress_callback_exceptions=True)
 
     app.layout = html.Div([
         html.H3("Fragmentome explorer"),
 
         dcc.Store(id='selected-sample', data=None),
         dcc.Store(id='uploaded-point', data=None),
+        dcc.Store(id='data-version', data=0),
         
         dcc.Loading(
             id="loading-icon",
@@ -108,6 +119,52 @@ def explore(args):
             multiple=False
         ),
         html.Div(id='upload-status', style={'padding': '0px 10px 10px 10px'}),
+
+        html.Details([
+            html.Summary('Import TSV data into database', style={'cursor': 'pointer', 'fontWeight': 'bold', 'padding': '10px'}),
+            html.Div([
+                html.Div([
+                    html.Label('Upload Core TSV (wide format: sample_id + feature columns)'),
+                    dcc.Upload(
+                        id='upload-core-tsv',
+                        children=html.Div(['Drag and Drop or ', html.A('Select Core TSV')]),
+                        style={
+                            'width': '100%', 'height': '50px', 'lineHeight': '50px',
+                            'borderWidth': '1px', 'borderStyle': 'dashed', 'borderRadius': '5px',
+                            'textAlign': 'center', 'margin': '5px 0'
+                        },
+                        multiple=False
+                    ),
+                    html.Div(id='upload-core-status', style={'padding': '5px', 'color': '#555'})
+                ], style={'width': '45%', 'display': 'inline-block', 'verticalAlign': 'top', 'padding': '10px'}),
+                html.Div([
+                    html.Label('Upload Meta TSV (sample_id + metadata columns)'),
+                    dcc.Upload(
+                        id='upload-meta-tsv',
+                        children=html.Div(['Drag and Drop or ', html.A('Select Meta TSV')]),
+                        style={
+                            'width': '100%', 'height': '50px', 'lineHeight': '50px',
+                            'borderWidth': '1px', 'borderStyle': 'dashed', 'borderRadius': '5px',
+                            'textAlign': 'center', 'margin': '5px 0'
+                        },
+                        multiple=False
+                    ),
+                    html.Div(id='upload-meta-status', style={'padding': '5px', 'color': '#555'})
+                ], style={'width': '45%', 'display': 'inline-block', 'verticalAlign': 'top', 'padding': '10px'}),
+                html.Div([
+                    html.Button('Clear database & reload', id='clear-db-btn', n_clicks=0,
+                                style={'backgroundColor': '#dc3545', 'color': 'white', 'border': 'none',
+                                       'padding': '8px 16px', 'borderRadius': '4px', 'cursor': 'pointer'}),
+                    html.Div(id='clear-db-status', style={'display': 'inline-block', 'padding': '0 10px', 'color': '#555'})
+                ], style={'padding': '10px'}),
+                html.Div(
+                    f"Database: {db.get_sample_count(ch_client, db.CORE_TABLE)} core samples, "
+                    f"{db.get_sample_count(ch_client, db.META_TABLE)} meta samples",
+                    id='db-info',
+                    style={'padding': '5px 10px', 'color': '#888', 'fontSize': '12px'}
+                )
+            ])
+        ], open=not has_data),
 
         html.Div([
             html.Div([
@@ -356,6 +413,73 @@ def explore(args):
             pass
 
     @app.callback(
+        Output('upload-core-status', 'children'),
+        Output('data-version', 'data', allow_duplicate=True),
+        Input('upload-core-tsv', 'contents'),
+        State('upload-core-tsv', 'filename'),
+        State('data-version', 'data'),
+        prevent_initial_call=True
+    )
+    def handle_core_tsv_upload(contents, filename, current_version):
+        nonlocal dfcore, core_x, core_col_names, csm_col_names, csm_x, p5_col_names, p5_x
+        if contents is None:
+            return '', current_version
+        try:
+            header, b64data = contents.split(',', 1)
+            data = base64.b64decode(b64data)
+            n = db.upload_core_from_bytes(ch_client, data)
+            dfcore = db.load_core_df(ch_client)
+            core_x, core_col_names, csm_col_names, csm_x, p5_col_names, p5_x = _prepare_core(dfcore)
+            return f'✓ Uploaded {n} core samples from {filename}. Refresh the page to update dropdowns.', (current_version or 0) + 1
+        except Exception as e:
+            return f'✗ Core upload failed: {str(e)}', current_version
+
+    @app.callback(
+        Output('upload-meta-status', 'children'),
+        Output('data-version', 'data', allow_duplicate=True),
+        Input('upload-meta-tsv', 'contents'),
+        State('upload-meta-tsv', 'filename'),
+        State('data-version', 'data'),
+        prevent_initial_call=True
+    )
+    def handle_meta_tsv_upload(contents, filename, current_version):
+        nonlocal dfmeta, numeric_columns, color_columns
+        if contents is None:
+            return '', current_version
+        try:
+            header, b64data = contents.split(',', 1)
+            data = base64.b64decode(b64data)
+            n = db.upload_meta_from_bytes(ch_client, data)
+            dfmeta = db.load_meta_df(ch_client)
+            dfmeta, numeric_columns, color_columns = _prepare_meta(dfmeta)
+            return f'✓ Uploaded {n} meta rows from {filename}. Refresh the page to update dropdowns.', (current_version or 0) + 1
+        except Exception as e:
+            return f'✗ Meta upload failed: {str(e)}', current_version
+
+    @app.callback(
+        Output('clear-db-status', 'children'),
+        Output('data-version', 'data', allow_duplicate=True),
+        Input('clear-db-btn', 'n_clicks'),
+        State('data-version', 'data'),
+        prevent_initial_call=True
+    )
+    def handle_clear_db(n_clicks, current_version):
+        nonlocal dfcore, dfmeta, numeric_columns, color_columns
+        nonlocal core_x, core_col_names, csm_col_names, csm_x, p5_col_names, p5_x
+        if not n_clicks:
+            return '', current_version
+        try:
+            db.drop_tables(ch_client)
+            dfcore = pd.DataFrame()
+            dfmeta = pd.DataFrame()
+            numeric_columns = []
+            color_columns = []
+            core_x, core_col_names, csm_col_names, csm_x, p5_col_names, p5_x = [], [], [], [], [], []
+            return '✓ Database cleared. Upload new TSV files.', (current_version or 0) + 1
+        except Exception as e:
+            return f'✗ Clear failed: {str(e)}', current_version
+
+    @app.callback(
         Output('selected-sample', 'data'),
         Input('scatter-plot', 'clickData')
     )
@@ -574,9 +698,11 @@ def explore(args):
                     mode='markers',
                     marker=dict(size=18, symbol='star', color='red', line=dict(color='darkred', width=2)),
                     name='Uploaded sample',
-                    hovertemplate=f"{uploaded_point.get('label','Uploaded')}<br>x=%{{x:.3f}}<br>y=%{{y:.3f}}<extra></extra>",
+                    hovertemplate=f"{uploaded_point.get('label','Uploaded')}<br>umap1=%{{x:.3f}}<br>umap2=%{{y:.3f}}<extra></extra>",
                 )
             )
+            # Ensure the uploaded point is always on top
+            fig.data[-1].update(showlegend=True)
 
         return fig
 
