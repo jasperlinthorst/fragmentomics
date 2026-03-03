@@ -140,10 +140,10 @@ def main():
     parser_nipt.add_argument("--gccorrect", dest="gccorrect", action="store_true", default=False, help="Apply GC content correction before normalisation and calling")
     parser_nipt.set_defaults(func=nipt.nipt)
 
-    parser_fragmentome = subparsers.add_parser('fragmentome', prog="cfstats fragmentome", description="Start interactive fragmentome explorer web application", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
-    parser_fragmentome.add_argument('meta', help='Tab-separated value list, first column is sample identifier (index), additional columns indicate arbitrary sample characteristics for filtering, coloring, etc.')
-    parser_fragmentome.add_argument('core', help='Tab-separated value list, first column is sample identifier (index), additional rows are cfstats fszd, 5pends, csm.')
+    parser_fragmentome = subparsers.add_parser('fragmentome', prog="cfstats fragmentome", description="Start interactive fragmentome explorer web application (data is loaded from ClickHouse)", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_fragmentome.add_argument('--mapping', dest='mapping', default=None, help='Pickled (reducer, embedding, k) mapping as produced/used by cfstats dnase1l3 plot. Required for upload-to-embedding functionality.')
+    parser_fragmentome.add_argument('--ch-host', dest='ch_host', default='localhost', help='ClickHouse server host.')
+    parser_fragmentome.add_argument('--ch-port', dest='ch_port', default=8123, type=int, help='ClickHouse HTTP port.')
     parser_fragmentome.set_defaults(func=fragmentome.explore)
 
     args = parser.parse_args()
