@@ -300,12 +300,6 @@ def explore(args):
         if contents is None:
             return None, '', current_x, current_y, 'Ready'
 
-        # Show processing status immediately
-        if isinstance(contents, (list, tuple)):
-            if not contents:
-                return None, 'Upload failed: empty contents.', current_x, current_y, 'Error: Empty upload'
-            contents = contents[0]
-
         if not isinstance(contents, str):
             return None, f'Upload failed: unexpected contents type {type(contents)}.', current_x, current_y, 'Error: Invalid content type'
 
