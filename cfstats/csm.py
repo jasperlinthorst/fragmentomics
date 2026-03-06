@@ -30,7 +30,7 @@ def worker_cleavesitemotifs(pl):
         samplefrac=args.maxo/total_mapped_reads
 
     i=0
-    for read in cram.fetch():
+    for read in cram.fetch(until_eof=True):
         if args.maxo!=None: #restrict to sample approximately maxo reads
             if random.random() > samplefrac:
                 continue
@@ -204,7 +204,7 @@ def cleavesitemotifsbysize(args, cmdline=True):
             samplefrac=args.maxo/total_mapped_reads
 
         i=0
-        for read in cram.fetch():
+        for read in cram.fetch(until_eof=True):
             
             if args.reqflag != None:
                 if read.flag & args.reqflag != args.reqflag:
