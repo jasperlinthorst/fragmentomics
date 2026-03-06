@@ -144,6 +144,7 @@ def main():
     parser_fragmentome.add_argument('--mapping', dest='mapping', default=None, help='Pickled (reducer, embedding, k) mapping as produced/used by cfstats dnase1l3 plot. Required for upload-to-embedding functionality.')
     parser_fragmentome.add_argument('--ch-host', dest='ch_host', default='localhost', help='ClickHouse server host.')
     parser_fragmentome.add_argument('--ch-port', dest='ch_port', default=8123, type=int, help='ClickHouse HTTP port.')
+    parser_fragmentome.add_argument('--admin-password', dest='admin_password', default=None, help='Password for the /admin upload page. If omitted, uses FRAGMENTOME_ADMIN_PASSWORD env var.')
     parser_fragmentome.set_defaults(func=fragmentome.explore)
 
     args = parser.parse_args()
