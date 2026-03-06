@@ -43,7 +43,7 @@ def worker_5pends(pl):
         samplefrac = args.maxo / total_mapped_reads
 
     i = 0
-    for read in cram:
+    for read in cram.fetch(until_eof=True):
         if args.maxo is not None:
             if random.random() > samplefrac:
                 continue
@@ -144,7 +144,7 @@ def _5pendsbysize(args, cmdline=True):
             samplefrac=args.maxo/total_mapped_reads
 
         i=0
-        for read in cram:
+        for read in cram.fetch(until_eof=True):
             
             if args.reqflag != None:
                 if read.flag & args.reqflag != args.reqflag:

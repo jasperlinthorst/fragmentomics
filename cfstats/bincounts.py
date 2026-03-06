@@ -103,7 +103,7 @@ def bincounts(args, cmdline=True):
             if args.norm=='freq':
                 sys.stdout.write("\t".join(map(str,np.array(v)/v.sum()))+"\n")
             elif args.norm=='rpx':
-                sys.stdout.write("\t".join(map(str,(np.array(v)/(v.sum()/args.x))).astype(int))+"\n")
+                sys.stdout.write("\t".join(map(str,(np.array(v)/(v.sum()/args.x)).astype(int)))+"\n")
             else:
                 sys.stdout.write("\t".join(map(str,v))+"\n")
 
