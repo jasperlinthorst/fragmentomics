@@ -4,6 +4,9 @@ import pandas as pd
 import numpy as np
 import datetime
 import time
+import sys
+
+import logging
 
 revcomptable = str.maketrans("acgtACGTRY","tgcaTGCAYR")
 
@@ -73,22 +76,24 @@ def get_gc_content(dfcnt, reference):
 
     return pd.Series(gc_content, index=dfcnt.columns, name="gc_content")
 
-def gc_correct_counts(counts_df, gc_content):
+def gc_correct_counts(counts_df, gc_content, frac=0.1):
     # Fit a loess/lowess or polynomial regression for each sample to correct for GC bias
-
+    log=logging.getLogger(__name__)
     corrected = pd.DataFrame(index=counts_df.index, columns=counts_df.columns)
     i=0
     for idx, row in counts_df.iterrows():
+
         mask = (~row.isna()) & (~gc_content.isna())
-        if mask.sum() < 10:
+        if mask.sum() < 10 or row.sum()==0:
             corrected.loc[idx] = row
             continue
-        fitted = lowess(row[mask], gc_content[mask], frac=0.1, return_sorted=False)
+        fitted = lowess(row[mask], gc_content[mask], frac=frac, return_sorted=False)
         corrected.loc[idx, mask] = row[mask] / fitted * np.nanmedian(row[mask])
         corrected.loc[idx, ~mask] = np.nan
+
         i+=1
         if i%1000==0:
-            print(datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'),"At %d ..."%i)
+            log.info("At %d ..."%i)
     return corrected
 
 def get_N_content_from_fasta(fasta_path, chrom, start, end):

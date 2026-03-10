@@ -5,10 +5,11 @@ import sys
 
 from cfstats import utils
 
-from logging import log
+import logging
 import numpy as np
 from multiprocessing import Pool
 import pandas as pd
+
 
 def worker_bincounts(pl):
     samfile,args=pl
@@ -49,6 +50,7 @@ def worker_bincounts(pl):
     return {'samfile':samfile, 'd':bins}
 
 def bincounts(args, cmdline=True):
+    log=logging.getLogger(__name__)
     if args.reference==None:
         raise ValueError("Reference file is required.")
 
@@ -81,6 +83,9 @@ def bincounts(args, cmdline=True):
             v+=list(bins[ref])
         
         v=np.array(v)
+        
+        if v.sum()<args.x:
+            log.warn("Normalisation unit (x=%d) is smaller than total read count. Consider ignoring sample=%s"%(args.x,samfile))
 
         if args.gccorrect:
             #gc correct
@@ -101,9 +106,14 @@ def bincounts(args, cmdline=True):
             if args.name:
                 sys.stdout.write(samfile+"\t")
             if args.norm=='freq':
-                sys.stdout.write("\t".join(map(str,np.array(v)/v.sum()))+"\n")
+                vnorm=(np.array(v)/v.sum()).astype(np.float64)
+                sys.stdout.write("\t".join(map(str,vnorm))+"\n")
             elif args.norm=='rpx':
-                sys.stdout.write("\t".join(map(str,(np.array(v)/(v.sum()/args.x)).astype(int)))+"\n")
+                if np.nansum(v)==0:
+                    vnorm=v
+                else:
+                    vnorm=(np.array(v)/(np.nansum(v)/args.x))
+                sys.stdout.write("\t".join(map(str,vnorm))+"\n")
             else:
                 sys.stdout.write("\t".join(map(str,v))+"\n")
 
