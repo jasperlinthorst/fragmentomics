@@ -91,8 +91,9 @@ def bincounts(args, cmdline=True):
             #gc correct
             dfcnt=pd.DataFrame([v], columns=reflabels)
             gc_content = utils.get_gc_content(dfcnt, args.reference)
-            dfcnt_corrected = utils.gc_correct_counts(dfcnt, gc_content)
+            dfcnt_corrected = utils.gc_correct_counts(dfcnt, gc_content, frac=args.frac)
             v = dfcnt_corrected.iloc[0].values
+            v[v<0]=0 #make sure gc corrected counts can not become negative 
 
         if not cmdline:
             V.append(v)
@@ -112,7 +113,7 @@ def bincounts(args, cmdline=True):
                 if np.nansum(v)==0:
                     vnorm=v
                 else:
-                    vnorm=(np.array(v)/(np.nansum(v)/args.x))
+                    vnorm=(np.array(v)/(np.nansum(v)/args.x)).astype(np.uint32)
                 sys.stdout.write("\t".join(map(str,vnorm))+"\n")
             else:
                 sys.stdout.write("\t".join(map(str,v))+"\n")

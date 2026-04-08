@@ -77,6 +77,7 @@ def main():
     parser_bincounts.add_argument("--bamlist", dest="bamlist", type=str, default=None, help="File containing a list of sam/bam/cram files (one per line).")
     parser_bincounts.add_argument("-b", "--binsize", dest="binsize", type=int, default=1000000, help="Size of the bins.")
     parser_bincounts.add_argument("--gccorrect", dest="gccorrect", action="store_true", default=False, help="Apply GC content correction.")
+    parser_bincounts.add_argument("--frac", dest="frac", type=float, default=0.5, help="GC smoothing parameter, fraction of the data used for fitting.")
     parser_bincounts.set_defaults(func=bincounts.bincounts)
 
     parser_fszd = subparsers.add_parser('fszd',prog="cfstats fszd", description="Extract fragment size distribution (only for paired-end data)", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
