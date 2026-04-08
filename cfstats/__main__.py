@@ -15,6 +15,33 @@ from cfstats import utils, nipt, ff, bincounts, fszd, csm, delfi, fpends, dnase1
 
 parser = argparse.ArgumentParser(prog="cfstats", usage="cfstats -h", description="Gather cfDNA statistics", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
+MODEL_LICENCE_NOTICE = """
+================================================================================
+  MODEL LICENCE NOTICE
+================================================================================
+  The model(s) used by this command are provided strictly for non-commercial,
+  academic, and research purposes only. They may NOT be used for any commercial
+  or clinical purpose. See the models/LICENSE file for full terms.
+
+  By proceeding you confirm that you accept these terms.
+
+  Tip: use --confirm-licence to bypass this prompt in automated pipelines.
+================================================================================
+"""
+
+def confirm_model_licence(args):
+    """Check that the user has accepted the model licence."""
+    if getattr(args, 'confirm_licence', False):
+        return  # already confirmed via CLI flag
+    sys.stderr.write(MODEL_LICENCE_NOTICE)
+    try:
+        answer = input("Do you accept the model licence terms? [yes/no]: ").strip().lower()
+    except EOFError:
+        answer = ""
+    if answer not in ("yes", "y"):
+        sys.stderr.write("Licence not accepted. Exiting.\n")
+        sys.exit(1)
+
 def main():
     global_parser = argparse.ArgumentParser(add_help=False) #parser for arguments that apply to all subcommands
     
@@ -101,7 +128,8 @@ def main():
     parser_R206C = subparsers.add_parser('dnase1l3',prog="cfstats dnase1l3", description="Predict dnase1l3 activity using fragmentomics", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_R206C.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
     parser_R206C.add_argument('clf', help='Pickled pca/classifier/regressor model')
-    parser_R206C.set_defaults(func=dnase1l3.dnase1l3)
+    parser_R206C.add_argument('--confirm-licence', dest='confirm_licence', action='store_true', default=False, help='Confirm acceptance of the model licence (non-commercial, research-only use). Bypasses the interactive licence prompt.')
+    parser_R206C.set_defaults(func=dnase1l3.dnase1l3, requires_licence=True)
 
     parser_plot = subparsers.add_parser('plot',prog="cfstats R206C", description="Plot points in fragmentome embedding", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_plot.add_argument("--outfile", dest="outfile", default=None, help="Name of the file to store the plot.")
@@ -132,7 +160,8 @@ def main():
     parser_ff = subparsers.add_parser('ff', prog="cfstats ff", description="Estimate ff", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_ff.add_argument('predictor', help='Regression model that can be used to predict the fetal fraction.')
     parser_ff.add_argument('samfiles', nargs='+', help='sam/bam/cram files for which ff should be predicted')
-    parser_ff.set_defaults(func=ff.ff)
+    parser_ff.add_argument('--confirm-licence', dest='confirm_licence', action='store_true', default=False, help='Confirm acceptance of the model licence (non-commercial, research-only use). Bypasses the interactive licence prompt.')
+    parser_ff.set_defaults(func=ff.ff, requires_licence=True)
 
     parser_nipt = subparsers.add_parser('nipt', prog="cfstats nipt", description="Perform typical NIPT analysis", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_nipt.add_argument('referencesamples', help='Tab-separated value list in which rows are samples and columns are bincounts (matched with specified bin size)')
@@ -153,6 +182,8 @@ def main():
 
     if hasattr(args, 'func'):
         random.seed(args.seed)
+        if getattr(args, 'requires_licence', False):
+            confirm_model_licence(args)
         #try:
         args.func(args)
         #except Exception as e:
