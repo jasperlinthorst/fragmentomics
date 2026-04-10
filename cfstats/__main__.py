@@ -1,17 +1,9 @@
 from logging import log
-import numpy as np
-import pandas as pd
 import argparse
 import sys
 import os 
 import random
-import sklearn
-import pickle
-import base64
-from multiprocessing import Pool
 import logging as log_module
-
-from cfstats import utils, nipt, ff, bincounts, fszd, csm, delfi, fpends, dnase1l3, ft, nucs, fragmentome
 
 parser = argparse.ArgumentParser(prog="cfstats", usage="cfstats -h", description="Gather cfDNA statistics", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
@@ -42,6 +34,15 @@ def confirm_model_licence(args):
         sys.stderr.write("Licence not accepted. Exiting.\n")
         sys.exit(1)
 
+class lazy_cmd:
+    """Picklable callable that lazily imports cfstats.<module_name> and calls <func_name>."""
+    def __init__(self, module_name, func_name):
+        self.module_name = module_name
+        self.func_name = func_name
+    def __call__(self, args):
+        mod = __import__(f"cfstats.{self.module_name}", fromlist=[self.func_name])
+        return getattr(mod, self.func_name)(args)
+
 def main():
     global_parser = argparse.ArgumentParser(add_help=False) #parser for arguments that apply to all subcommands
     
@@ -64,6 +65,7 @@ def main():
     global_parser.add_argument("-r", dest="reference", default=None, type=str, help="Reference file for: reference depended features cleave-site motifs/binned counts/cram decoding.")
     global_parser.add_argument("--seed", dest="seed", default=42, type=int, help="Seed for random number generator.")
 
+    parser = argparse.ArgumentParser(prog="cfstats", usage="cfstats -h", description="Gather cfDNA statistics", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     subparsers = parser.add_subparsers()
     
     parser_csmbsz = subparsers.add_parser('csmbsz',prog="cfstats csmbsz", description="Extract k-length cleave-site motifs using the reference sequence at the 5' start/end of cfDNA fragments and stratify by size of the cfDNA fragment.", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
@@ -73,20 +75,20 @@ def main():
     parser_csmbsz.add_argument('-l','--lower', default=60, type=int, help='Lower limit for fragments to report')
     parser_csmbsz.add_argument('-u','--upper', default=600, type=int, help='Upper limit for fragments to report')
     parser_csmbsz.add_argument("--noinsert", dest="insertissize", action="store_false", default=True, help="In case of long-read/unpaired sequencing infer fragmentsize from sequence instead of insert.")
-    parser_csmbsz.set_defaults(func=csm.cleavesitemotifsbysize)
+    parser_csmbsz.set_defaults(func=lazy_cmd('csm', 'cleavesitemotifsbysize'))
 
     parser_csm = subparsers.add_parser('csm',prog="cfstats csm", description="Extract k-length cleave-site motifs using the reference sequence at the 5' start/end of cfDNA fragments.", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_csm.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
     parser_csm.add_argument("-k", dest="k", default=4, type=int, help="Length of the cleave-site motifs.")
     parser_csm.add_argument("--pp", dest="purpyr", action="store_true", default=False, help="Collapse nucleotide sequence to Purine/Pyrimidine sequence.")
-    parser_csm.set_defaults(func=csm.cleavesitemotifs)
+    parser_csm.set_defaults(func=lazy_cmd('csm', 'cleavesitemotifs'))
     
     parser_5pends = subparsers.add_parser('5pends',prog="cfstats 5pends", description="", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_5pends.add_argument('samfiles', nargs='+', help='sam/bam/cram file(s)')
     parser_5pends.add_argument("-k", dest="k", default=4, type=int, help="Length of the 5' ends patterns.")
     parser_5pends.add_argument("--useref", action="store_true", dest="useref", default=False, help="Use reference sequence instead of read sequence.")
     parser_5pends.add_argument("--uselexsmallest", action="store_true", dest="uselexsmallest", default=False, help="Only count lexigraphically smallest kmer.")
-    parser_5pends.set_defaults(func=fpends._5pends)
+    parser_5pends.set_defaults(func=lazy_cmd('fpends', '_5pends'))
 
     parser_5pendsbsz = subparsers.add_parser('5pendsbsz',prog="cfstats 5pendsbsz", description="", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_5pendsbsz.add_argument('samfiles', nargs='+', help='sam/bam/cram file(s)')
@@ -97,7 +99,7 @@ def main():
     parser_5pendsbsz.add_argument('-l','--lower', default=60, type=int, help='Lower limit for fragments to report')
     parser_5pendsbsz.add_argument('-u','--upper', default=600, type=int, help='Upper limit for fragments to report')
     parser_5pendsbsz.add_argument("--noinsert", dest="insertissize", action="store_false", default=True, help="In case of long-read/unpaired sequencing infer fragmentsize from sequence instead of insert.")
-    parser_5pendsbsz.set_defaults(func=fpends._5pendsbysize)
+    parser_5pendsbsz.set_defaults(func=lazy_cmd('fpends', '_5pendsbysize'))
 
     parser_bincounts = subparsers.add_parser('bincounts',prog="cfstats bincounts", description="", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_bincounts.add_argument('samfiles', nargs='*', help='sam/bam/cram file')
@@ -105,7 +107,7 @@ def main():
     parser_bincounts.add_argument("-b", "--binsize", dest="binsize", type=int, default=1000000, help="Size of the bins.")
     parser_bincounts.add_argument("--gccorrect", dest="gccorrect", action="store_true", default=False, help="Apply GC content correction.")
     parser_bincounts.add_argument("--frac", dest="frac", type=float, default=0.5, help="GC smoothing parameter, fraction of the data used for fitting.")
-    parser_bincounts.set_defaults(func=bincounts.bincounts)
+    parser_bincounts.set_defaults(func=lazy_cmd('bincounts', 'bincounts'))
 
     parser_fszd = subparsers.add_parser('fszd',prog="cfstats fszd", description="Extract fragment size distribution (only for paired-end data)", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_fszd.add_argument('samfiles', nargs='*', help='sam/bam/cram file')
@@ -113,7 +115,7 @@ def main():
     parser_fszd.add_argument('-l','--lower', default=60, type=int, help='Lower limit for fragments to report')
     parser_fszd.add_argument('-u','--upper', default=1000, type=int, help='Upper limit for fragments to report')
     parser_fszd.add_argument("--noinsert", dest="insertissize", action="store_false", default=True, help="In case of long-read/unpaired sequencing infer fragmentsize from sequence instead of insert.")
-    parser_fszd.set_defaults(func=fszd.fszd)
+    parser_fszd.set_defaults(func=lazy_cmd('fszd', 'fszd'))
         
     parser_delfi = subparsers.add_parser('delfi',prog="cfstats delfi", description="Extract DELFI-like measure for bins of a predefined size (only for paired-end data)", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_delfi.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
@@ -123,19 +125,19 @@ def main():
     parser_delfi.add_argument('--long-lower', dest='longlow', default=150, help='Definition of long fragments')
     parser_delfi.add_argument('--long-upper', dest='longup', default=200, help='Definition of short fragments')
     parser_delfi.add_argument("--noinsert", dest="insertissize", action="store_false", default=True, help="In case of long-read/unpaired sequencing infer fragmentsize from sequence instead of insert.")
-    parser_delfi.set_defaults(func=delfi.delfi)
+    parser_delfi.set_defaults(func=lazy_cmd('delfi', 'delfi'))
 
     parser_R206C = subparsers.add_parser('dnase1l3',prog="cfstats dnase1l3", description="Predict dnase1l3 activity using fragmentomics", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_R206C.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
     parser_R206C.add_argument('clf', help='Pickled pca/classifier/regressor model')
     parser_R206C.add_argument('--confirm-licence', dest='confirm_licence', action='store_true', default=False, help='Confirm acceptance of the model licence (non-commercial, research-only use). Bypasses the interactive licence prompt.')
-    parser_R206C.set_defaults(func=dnase1l3.dnase1l3, requires_licence=True)
+    parser_R206C.set_defaults(func=lazy_cmd('dnase1l3', 'dnase1l3'), requires_licence=True)
 
     parser_plot = subparsers.add_parser('plot',prog="cfstats R206C", description="Plot points in fragmentome embedding", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_plot.add_argument("--outfile", dest="outfile", default=None, help="Name of the file to store the plot.")
     parser_plot.add_argument('mapping', help='Pickled embedding')
     parser_plot.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
-    parser_plot.set_defaults(func=dnase1l3.plot_fragmentome)
+    parser_plot.set_defaults(func=lazy_cmd('dnase1l3', 'plot_fragmentome'))
 
     parser_fourier = subparsers.add_parser('fourier', prog="cfstats fourier", description="Extract Fourier transformed coverage profile for each gene", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_fourier.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
@@ -143,7 +145,7 @@ def main():
     parser_fourier.add_argument('-w', dest='window', default=10000, help='Size of the gene body which whould be transformed')
     parser_fourier.add_argument('--amplitude-min', dest='ampmin', default=193, help='Amplitude range over which mean is calculated')
     parser_fourier.add_argument('--amplitude-max', dest='ampmax', default=199, help='Amplitude range over which mean is calculated')
-    parser_fourier.set_defaults(func=ft.fourier_transform_coverage)
+    parser_fourier.set_defaults(func=lazy_cmd('ft', 'fourier_transform_coverage'))
 
     parser_nucs = subparsers.add_parser('nucs', prog="cfstats nucs", description="Call nucleosomes from WPS profiles (region or genome-wide)", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_nucs.add_argument('samfiles', nargs='+', help='sam/bam/cram file(s)')
@@ -155,13 +157,13 @@ def main():
     parser_nucs.add_argument('--max-len', dest='max_len', type=int, default=180, help='Maximum fragment length to include')
     parser_nucs.add_argument('--min-prominence', dest='min_prominence', type=float, default=5.0, help='Minimum WPS peak prominence for nucleosome calling')
     parser_nucs.add_argument('--min-distance', dest='min_distance', type=int, default=147, help='Minimum distance between nucleosome peaks (bp)')
-    parser_nucs.set_defaults(func=nucs.nucs)
+    parser_nucs.set_defaults(func=lazy_cmd('nucs', 'nucs'))
 
     parser_ff = subparsers.add_parser('ff', prog="cfstats ff", description="Estimate ff", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_ff.add_argument('predictor', help='Regression model that can be used to predict the fetal fraction.')
     parser_ff.add_argument('samfiles', nargs='+', help='sam/bam/cram files for which ff should be predicted')
     parser_ff.add_argument('--confirm-licence', dest='confirm_licence', action='store_true', default=False, help='Confirm acceptance of the model licence (non-commercial, research-only use). Bypasses the interactive licence prompt.')
-    parser_ff.set_defaults(func=ff.ff, requires_licence=True)
+    parser_ff.set_defaults(func=lazy_cmd('ff', 'ff'), requires_licence=True)
 
     parser_nipt = subparsers.add_parser('nipt', prog="cfstats nipt", description="Perform typical NIPT analysis", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_nipt.add_argument('referencesamples', help='Tab-separated value list in which rows are samples and columns are bincounts (matched with specified bin size)')
@@ -169,14 +171,14 @@ def main():
     parser_nipt.add_argument("--ff", dest="ff", type=float, default=0.10, help="Global fetal fraction to use")
     parser_nipt.add_argument("-b", "--binsize", dest="binsize", type=int, default=1000000, help="Size of the bins.")
     parser_nipt.add_argument("--gccorrect", dest="gccorrect", action="store_true", default=False, help="Apply GC content correction before normalisation and calling")
-    parser_nipt.set_defaults(func=nipt.nipt)
+    parser_nipt.set_defaults(func=lazy_cmd('nipt', 'nipt'))
 
     parser_fragmentome = subparsers.add_parser('fragmentome', prog="cfstats fragmentome", description="Start interactive fragmentome explorer web application (data is loaded from ClickHouse)", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_fragmentome.add_argument('--mapping', dest='mapping', default=None, help='Pickled (reducer, embedding, k) mapping as produced/used by cfstats dnase1l3 plot. Required for upload-to-embedding functionality.')
     parser_fragmentome.add_argument('--ch-host', dest='ch_host', default='localhost', help='ClickHouse server host.')
     parser_fragmentome.add_argument('--ch-port', dest='ch_port', default=8123, type=int, help='ClickHouse HTTP port.')
     parser_fragmentome.add_argument('--admin-password', dest='admin_password', default=None, help='Password for the /admin upload page. If omitted, uses FRAGMENTOME_ADMIN_PASSWORD env var.')
-    parser_fragmentome.set_defaults(func=fragmentome.explore)
+    parser_fragmentome.set_defaults(func=lazy_cmd('fragmentome', 'explore'))
 
     args = parser.parse_args()
 

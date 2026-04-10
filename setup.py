@@ -1,11 +1,13 @@
 
 from setuptools import setup, find_packages
 
+#install_requires = ["numpy","scikit-learn","pandas","biopython","matplotlib","seaborn","scipy","scanpy","anndata","gffutils","pysam","pyglmnet"],
+
 setup(
     name='cfstats', author="Jasper Linthorst", author_email="jasper.linthorst@gmail.com",
     version='0.1',
     packages=find_packages(),
-    install_requires = ["numpy","scikit-learn","pandas","biopython","matplotlib","seaborn","scipy","scanpy","anndata","gffutils"],#,"glmnet"],
+    install_requires=["clickhouse-connect"],
     entry_points={
         'console_scripts': [
             'cfstats=cfstats.__main__:main',
