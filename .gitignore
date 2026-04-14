@@ -12,3 +12,15 @@ dist/*
 tri.1M.tsv
 test.tsv
 data/reference.w1000000.q1.F1024.tsv
+*.pyc
+*.h5ad
+*.bam
+*.bam.bai
+*.cram
+*.cram.crai
+*.h5
+*.graphml
+*.csv
+*.swp
+.DS_Store
+uploads/
