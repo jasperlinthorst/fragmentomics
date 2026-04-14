@@ -24,6 +24,7 @@ import plotly.graph_objects as go
 from flask import request, jsonify
 
 from cfstats import fszd, csm, fpends, db
+from cfstats.models import get_hf_model_path
 
 warnings.filterwarnings(
     'ignore',
@@ -91,8 +92,12 @@ def explore(args):
     default_y_col = None
 
     mapping = None
-    if getattr(args, 'mapping', None):
-        mapping = pickle.load(open(args.mapping, 'rb'))
+    mapping_path = getattr(args, 'mapping', None)
+    if mapping_path is None:
+        log.info('No --mapping provided; downloading UMAP model from Hugging Face Hub')
+        mapping_path = get_hf_model_path('umap_all_py3.7.9_2018_2019_2020_2021_2022.pkl')
+    if mapping_path:
+        mapping = pickle.load(open(mapping_path, 'rb'))
         reducer = mapping[0]
         embedding = mapping[1]
         mapping_k = mapping[2]

@@ -25,6 +25,7 @@ setup(
         "clickhouse-connect==0.13.0",
         "dash==4.0.0",
         "plotly==6.5.2",
+        "huggingface_hub>=0.20.0",
     ],
     entry_points={
         'console_scripts': [

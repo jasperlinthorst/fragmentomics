@@ -41,6 +41,9 @@ def dnase1l3(args, cmdline=True):
 
     f=np.concatenate((Xfszd,Xcsm,Xsem),axis=1)
 
+    if hasattr(clf_svc, 'feature_names_in_'):
+        f = pd.DataFrame(f, columns=clf_svc.feature_names_in_)
+
     preds = clf_svc.predict(f)
     probs = clf_svc.predict_proba(f)
 
