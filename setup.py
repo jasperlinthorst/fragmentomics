@@ -20,7 +20,7 @@ setup(
         "pysam==0.23.3",
         "joblib==1.5.3",
         "gffutils==0.13",
-        "python-glmnet==2.2.2.post2",
+        "python-glmnet>=2.6.1",
         "statsmodels==0.14.6",
         "clickhouse-connect==0.13.0",
         "dash==4.0.0",

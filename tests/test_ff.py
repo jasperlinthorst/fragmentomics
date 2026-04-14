@@ -40,7 +40,7 @@ class TestFf:
             mock_bc.bincounts.return_value = (fake_columns, fake_counts)
 
             from cfstats.ff import ff
-            args = make_args(predictor="dummy.pickle")
+            args = make_args(model="dummy.pickle")
             result = ff(args, cmdline=False)
 
         assert result is not None
@@ -61,7 +61,7 @@ class TestFf:
             mock_bc.bincounts.return_value = (fake_columns, fake_counts)
 
             from cfstats.ff import ff
-            args = make_args(predictor="dummy.pickle")
+            args = make_args(model="dummy.pickle")
             ff(args, cmdline=True)
 
         captured = capsys.readouterr()
