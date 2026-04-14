@@ -5,6 +5,8 @@ import os
 import random
 import logging as log_module
 
+from cfstats.models import get_model_path
+
 parser = argparse.ArgumentParser(prog="cfstats", usage="cfstats -h", description="Gather cfDNA statistics", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
 MODEL_LICENCE_NOTICE = """
@@ -129,13 +131,13 @@ def main():
 
     parser_R206C = subparsers.add_parser('dnase1l3',prog="cfstats dnase1l3", description="Predict dnase1l3 activity using fragmentomics", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_R206C.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
-    parser_R206C.add_argument('clf', help='Pickled pca/classifier/regressor model')
+    parser_R206C.add_argument('--model', dest='model', default=get_model_path('SVC_all_k4.joblib'), help='Pickled pca/classifier/regressor model')
     parser_R206C.add_argument('--confirm-licence', dest='confirm_licence', action='store_true', default=False, help='Confirm acceptance of the model licence (non-commercial, research-only use). Bypasses the interactive licence prompt.')
     parser_R206C.set_defaults(func=lazy_cmd('dnase1l3', 'dnase1l3'), requires_licence=True)
 
     parser_plot = subparsers.add_parser('plot',prog="cfstats R206C", description="Plot points in fragmentome embedding", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_plot.add_argument("--outfile", dest="outfile", default=None, help="Name of the file to store the plot.")
-    parser_plot.add_argument('mapping', help='Pickled embedding')
+    parser_plot.add_argument('--mapping', dest='mapping', default=None, help='Pickled embedding')
     parser_plot.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
     parser_plot.set_defaults(func=lazy_cmd('dnase1l3', 'plot_fragmentome'))
 
@@ -160,8 +162,8 @@ def main():
     parser_nucs.set_defaults(func=lazy_cmd('nucs', 'nucs'))
 
     parser_ff = subparsers.add_parser('ff', prog="cfstats ff", description="Estimate ff", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
-    parser_ff.add_argument('predictor', help='Regression model that can be used to predict the fetal fraction.')
     parser_ff.add_argument('samfiles', nargs='+', help='sam/bam/cram files for which ff should be predicted')
+    parser_ff.add_argument('--model', dest='model', default=get_model_path('ffpredictor_50kautosomalbins.pickle'), help='Regression model that can be used to predict the fetal fraction.')
     parser_ff.add_argument('--confirm-licence', dest='confirm_licence', action='store_true', default=False, help='Confirm acceptance of the model licence (non-commercial, research-only use). Bypasses the interactive licence prompt.')
     parser_ff.set_defaults(func=lazy_cmd('ff', 'ff'), requires_licence=True)
 

@@ -18,7 +18,7 @@ from glmnet import ElasticNet as glmElasticNet
 #cfstats ff /net/beegfs/users/P051809/notebooks/notebooks/ffpredictor_ridge_50kautosomalbins.pickle /net/beegfs/hgn/niptres/allnipt/crams/2019/4/N190307837/N190307837.cram /net/beegfs/hgn/niptres/allnipt/crams/2017/4/N170331413/N170331413.cram /net/beegfs/hgn/niptres/allnipt/crams/2020/1/N200100049/N200100049.cram -r /net/beegfs/hgn/niptres/allnipt/lib/hg38flat.fa --nproc 5
 
 def ff(args, cmdline=True):
-    tup=pickle.load(open(args.predictor, 'rb'))
+    tup=pickle.load(open(args.model, 'rb'))
     #TODO: determine number and type of features based on model
     clf=tup[0]
     feats=tup[1]

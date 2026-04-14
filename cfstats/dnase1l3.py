@@ -8,30 +8,55 @@ import sys
 from cfstats import csm, fszd, fpends
 import os
 
-def dnase1l3(args):
-    (pca,clfb,clfgt,reg)=pickle.load(open(args.clf, 'rb'))
+import joblib
+
+def dnase1l3(args, cmdline=True):
+
+    clf_svc=joblib.load(args.model)
 
     args.k=4
-    args.norm='rpx'
-    args.x=1000000
-    args.purpyr=False
+    args.norm='freq'
     
-    f=np.array(list(csm.cleavesitemotifs(args, cmdline=False, ))).reshape(1,-1)
+    args.exclflag=3852
+    args.mapqual=60
 
-    fp=pca.transform(f)
+    #args.x=1000000
+    args.purpyr=False
+    args.uselexsmallest=False
+    args.useref=False
+    args.insertissize=True
+    args.lower=0
+    args.upper=1000
+    args.bamlist=None
 
-    b=clfb.predict(fp)[0]
-    gt=clfgt.predict(fp)[0]
-    classp=clfgt.predict_proba(fp)[0]
+    Xfszd=np.array(fszd.fszd(args, cmdline=False, ))#.reshape(1,-1)
+    args.mapqual=60
+    args.exclflag=3852
 
-    actreg=reg.predict(fp)[0]
+    Xcsm=np.array(csm.cleavesitemotifs(args, cmdline=False, ))#.reshape(1,-1)
+    #print("csm",Xcsm,Xcsm.sum())
 
-    sys.stdout.write(f"R206C genotype prediction: {gt} (0={classp[0]:.2f},1={classp[1]:.2f},2={classp[2]:.2f})\tR206C homozygous vs WT: {b}\tDNASE1L3 plasma activity regression: {actreg:.3f}\n")
+    Xsem=np.array(fpends._5pends(args, cmdline=False, ))#.reshape(1,-1)
+    #print("sem",Xsem,Xsem.sum())
 
+    f=np.concatenate((Xfszd,Xcsm,Xsem),axis=1)
+
+    preds = clf_svc.predict(f)
+    probs = clf_svc.predict_proba(f)
+
+    if cmdline:
+        for smp, pred, prob in zip(args.samfiles, preds, probs):
+            sys.stdout.write(f"{smp}\t{pred}\t{prob[1]:.4f}\n")
+    else:
+        return preds, probs
 
 def plot_fragmentome(args):
     
     from matplotlib import pyplot as plt
+
+    if args.mapping is None:
+        sys.stderr.write("Error: --mapping is required for plot_fragmentome.\n")
+        sys.exit(1)
 
     (reducer,embedding,k)=pickle.load(open(args.mapping, 'rb'))
 
