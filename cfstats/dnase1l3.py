@@ -4,15 +4,18 @@ import sklearn
 import pickle
 import numpy as np
 import sys
+import logging
 
 from cfstats import csm, fszd, fpends
 import os
 
 import joblib
 
+log = logging.getLogger(__name__)
+
 def dnase1l3(args, cmdline=True):
 
-    clf_svc=joblib.load(args.model)
+    hf_token = getattr(args, 'hf_token', None)
 
     args.k=4
     args.norm='freq'
@@ -41,11 +44,16 @@ def dnase1l3(args, cmdline=True):
 
     f=np.concatenate((Xfszd,Xcsm,Xsem),axis=1)
 
-    if hasattr(clf_svc, 'feature_names_in_'):
-        f = pd.DataFrame(f, columns=clf_svc.feature_names_in_)
-
-    preds = clf_svc.predict(f)
-    probs = clf_svc.predict_proba(f)
+    if hf_token:
+        from cfstats.models import remote_dnase1l3_predict
+        log.info('Using remote DNASE1L3 API')
+        preds, probs = remote_dnase1l3_predict(f, hf_token)
+    else:
+        clf_svc=joblib.load(args.model)
+        if hasattr(clf_svc, 'feature_names_in_'):
+            f = pd.DataFrame(f, columns=clf_svc.feature_names_in_)
+        preds = clf_svc.predict(f)
+        probs = clf_svc.predict_proba(f)
 
     if cmdline:
         for smp, pred, prob in zip(args.samfiles, preds, probs):

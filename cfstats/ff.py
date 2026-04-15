@@ -4,7 +4,7 @@ import pickle
 import numpy as np
 from cfstats import bincounts
 import sys
-from logging import log
+import logging
 
 import warnings
 
@@ -14,14 +14,13 @@ warnings.filterwarnings(
 )
 from glmnet import ElasticNet as glmElasticNet
 
+log = logging.getLogger(__name__)
 
 #cfstats ff /net/beegfs/users/P051809/notebooks/notebooks/ffpredictor_ridge_50kautosomalbins.pickle /net/beegfs/hgn/niptres/allnipt/crams/2019/4/N190307837/N190307837.cram /net/beegfs/hgn/niptres/allnipt/crams/2017/4/N170331413/N170331413.cram /net/beegfs/hgn/niptres/allnipt/crams/2020/1/N200100049/N200100049.cram -r /net/beegfs/hgn/niptres/allnipt/lib/hg38flat.fa --nproc 5
 
 def ff(args, cmdline=True):
-    tup=pickle.load(open(args.model, 'rb'))
-    #TODO: determine number and type of features based on model
-    clf=tup[0]
-    feats=tup[1]
+
+    hf_token = getattr(args, 'hf_token', None)
 
     #for now use hardcoded match with how our model was trained
     args.binsize=50000
@@ -30,18 +29,29 @@ def ff(args, cmdline=True):
     args.mapqual=1
     args.gccorrect=False
 
-    log(0,"Binning read counts...")
+    log.info("Binning read counts...")
     columns, counts = bincounts.bincounts(args,cmdline=False)
-    log(0,"Binning done.")
-    
-    X=pd.DataFrame(counts,columns=columns)
-    
-    #norm and select bins
-    X=X.div(X.sum(axis=1),axis=0).loc[:,feats]
+    log.info("Binning done.")
 
-    ffs=clf.predict(X)
+    if hf_token:
+        from cfstats.models import remote_ff_predict
+        log.info('Using remote FF API')
+        ffs = remote_ff_predict(columns, np.array(counts, dtype=np.float64), hf_token)
+    else:
+        tup=pickle.load(open(args.model, 'rb'))
+        #TODO: determine number and type of features based on model
+        clf=tup[0]
+        feats=tup[1]
+
+        X=pd.DataFrame(counts,columns=columns)
+        
+        #norm and select bins
+        X=X.div(X.sum(axis=1),axis=0).loc[:,feats]
+
+        ffs=clf.predict(X)
+
     if cmdline:
-        for smp,ff in zip(args.samfiles, ffs):
-            sys.stdout.write("%s\t%s\n"%(smp,ff))
+        for smp,ffval in zip(args.samfiles, ffs):
+            sys.stdout.write("%s\t%s\n"%(smp,ffval))
     else:
         return ffs

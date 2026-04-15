@@ -966,7 +966,7 @@ def _lazy_load_meta_samples_chunk(client, sample_ids=None, features=None):
 def insert_alignment_results(client, filename, features, feature_names, umap1, umap2):
     """Insert alignment upload results into typed meta tables.
     
-    Numeric features and UMAP coordinates go to meta_float64.
+    Numeric features go to meta_float64; UMAP coordinates go to meta_float32.
     The filename goes to the String meta table.
     
     Args:
@@ -987,7 +987,7 @@ def insert_alignment_results(client, filename, features, feature_names, umap1, u
     
     version = int(time.time())
     
-    # All computed features + UMAP coords are Float64
+    # All computed features are Float64
     float_rows = []
     for i, fname in enumerate(feature_names):
         val = float(features[0, i]) if hasattr(features, 'shape') and len(features.shape) > 1 else float(features[i])
@@ -997,12 +997,19 @@ def insert_alignment_results(client, filename, features, feature_names, umap1, u
             'value': val,
             'version': version
         })
-    float_rows.append({'sample_id': unique_id, 'feature_name': 'umap1', 'value': float(umap1), 'version': version})
-    float_rows.append({'sample_id': unique_id, 'feature_name': 'umap2', 'value': float(umap2), 'version': version})
     
     df_float = pd.DataFrame(float_rows)
     client.insert_df(f'{DATABASE_NAME}.{TYPED_META_TABLES["Float64"]}',
                      df_float[['sample_id', 'feature_name', 'value', 'version']])
+    
+    # UMAP coordinates are Float32 (must match existing bulk-uploaded umap data)
+    df_umap = pd.DataFrame([
+        {'sample_id': unique_id, 'feature_name': 'umap1', 'value': np.float32(umap1), 'version': version},
+        {'sample_id': unique_id, 'feature_name': 'umap2', 'value': np.float32(umap2), 'version': version},
+    ])
+    df_umap['value'] = df_umap['value'].astype('float32')
+    client.insert_df(f'{DATABASE_NAME}.{TYPED_META_TABLES["Float32"]}',
+                     df_umap[['sample_id', 'feature_name', 'value', 'version']])
     
     # Filename is a String feature
     df_str = pd.DataFrame([{
@@ -1013,10 +1020,15 @@ def insert_alignment_results(client, filename, features, feature_names, umap1, u
     }])
     client.insert_df(f'{DATABASE_NAME}.{META_TABLE}', df_str[['sample_id', 'feature_name', 'value', 'version']])
     
-    # Update meta features — all alignment features are core
-    all_imported = [str(f) for f in feature_names] + ['umap1', 'umap2', 'filename']
+    # Update meta features — alignment core features (fszd/csm/5p) stay core;
+    # umap1/umap2 must remain 'meta' so they appear in explorer dropdowns.
+    core_imported = [str(f) for f in feature_names] + ['filename']
     try:
-        update_meta_features(client, feature_type='core', imported_features=all_imported)
+        update_meta_features(client, feature_type='core', imported_features=core_imported)
+    except Exception:
+        pass
+    try:
+        update_meta_features(client, feature_type='meta', imported_features=['umap1', 'umap2'])
     except Exception:
         pass
     

@@ -24,7 +24,7 @@ import plotly.graph_objects as go
 from flask import request, jsonify
 
 from cfstats import fszd, csm, fpends, db
-from cfstats.models import get_hf_model_path
+from cfstats.models import get_hf_model_path, remote_umap_transform
 
 warnings.filterwarnings(
     'ignore',
@@ -91,16 +91,34 @@ def explore(args):
     default_x_col = None
     default_y_col = None
 
+    hf_token = getattr(args, 'hf_token', None)
+    use_remote_api = hf_token is not None
+
     mapping = None
-    mapping_path = getattr(args, 'mapping', None)
-    if mapping_path is None:
-        log.info('No --mapping provided; downloading UMAP model from Hugging Face Hub')
-        mapping_path = get_hf_model_path('umap_all_py3.7.9_2018_2019_2020_2021_2022.pkl')
-    if mapping_path:
-        mapping = pickle.load(open(mapping_path, 'rb'))
-        reducer = mapping[0]
-        embedding = mapping[1]
-        mapping_k = mapping[2]
+    reducer = None
+    mapping_k = 4
+
+    if use_remote_api:
+        log.info('--hf-token provided; will use remote UMAP API for transforms (no local model download)')
+        mapping = 'remote'
+    else:
+        mapping_path = getattr(args, 'mapping', None)
+        if mapping_path is None:
+            log.info('No --mapping provided; attempting to download UMAP model from Hugging Face Hub')
+            try:
+                mapping_path = get_hf_model_path('umap_all_py3.7.9_2018_2019_2020_2021_2022.pkl')
+            except Exception as e:
+                log.warning('Failed to download UMAP model from HF Hub: %s', e)
+                mapping_path = None
+        if mapping_path:
+            log.info('Loading mapping from: %s', mapping_path)
+            mapping = pickle.load(open(mapping_path, 'rb'))
+            reducer = mapping[0]
+            embedding = mapping[1]
+            mapping_k = mapping[2]
+            log.info('Mapping loaded successfully (k=%s)', mapping_k)
+        else:
+            log.warning('No mapping available. Upload-to-embedding functionality will be disabled.')
     
     admin_password = getattr(args, 'admin_password', None) or os.environ.get('FRAGMENTOME_ADMIN_PASSWORD')
 
@@ -820,8 +838,10 @@ def explore(args):
             
             log.info('Computed features for %s (shape=%s); running reducer transform', filename, getattr(f, 'shape', None))
             
-            
-            fp = reducer.transform(f)
+            if use_remote_api:
+                fp, _ = remote_umap_transform(f, hf_token)
+            else:
+                fp = reducer.transform(f)
             log.debug('Reduced features shape: %s', getattr(fp, 'shape', None))
 
             x_new = float(fp[0, 0])
@@ -1513,7 +1533,10 @@ def explore(args):
             Xsem = np.array(fpends._5pends(upload_args, cmdline=False))
             feat = np.concatenate((Xfszd, Xcsm, Xsem), axis=1)
 
-            fp = reducer.transform(feat)
+            if use_remote_api:
+                fp, _ = remote_umap_transform(feat, hf_token)
+            else:
+                fp = reducer.transform(feat)
             x_new = float(fp[0, 0])
             y_new = float(fp[0, 1])
 

@@ -64,7 +64,7 @@ def main():
     global_parser.add_argument("-o", dest="maxo", default=None, type=int, help="Limit stats to maxo observations.")
     global_parser.add_argument("--header", dest="header", action="store_true", default=False, help="Write header for names of features")
     global_parser.add_argument("--noname", dest="name", action="store_false", default=True, help="Do not prefix tab-separated values with the name of the file")
-    global_parser.add_argument("-r", dest="reference", default=None, type=str, help="Reference file for: reference depended features cleave-site motifs/binned counts/cram decoding.")
+    global_parser.add_argument("-r", "--reference", dest="reference", default=None, type=str, help="Reference file for: reference depended features cleave-site motifs/binned counts/cram decoding.")
     global_parser.add_argument("--seed", dest="seed", default=42, type=int, help="Seed for random number generator.")
 
     parser = argparse.ArgumentParser(prog="cfstats", usage="cfstats -h", description="Gather cfDNA statistics", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -133,6 +133,7 @@ def main():
     parser_R206C.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
     parser_R206C.add_argument('--model', dest='model', default=get_model_path('SVC_all_k4.joblib'), help='Pickled pca/classifier/regressor model')
     parser_R206C.add_argument('--confirm-licence', dest='confirm_licence', action='store_true', default=False, help='Confirm acceptance of the model licence (non-commercial, research-only use). Bypasses the interactive licence prompt.')
+    parser_R206C.add_argument('--hf-token', dest='hf_token', default=None, help='Hugging Face token for remote DNASE1L3 API. When set, uses the remote cfstats-umap-api Space instead of the local model.')
     parser_R206C.set_defaults(func=lazy_cmd('dnase1l3', 'dnase1l3'), requires_licence=True)
 
     parser_plot = subparsers.add_parser('plot',prog="cfstats R206C", description="Plot points in fragmentome embedding", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
@@ -165,6 +166,7 @@ def main():
     parser_ff.add_argument('samfiles', nargs='+', help='sam/bam/cram files for which ff should be predicted')
     parser_ff.add_argument('--model', dest='model', default=get_model_path('ffpredictor_50kautosomalbins.pickle'), help='Regression model that can be used to predict the fetal fraction.')
     parser_ff.add_argument('--confirm-licence', dest='confirm_licence', action='store_true', default=False, help='Confirm acceptance of the model licence (non-commercial, research-only use). Bypasses the interactive licence prompt.')
+    parser_ff.add_argument('--hf-token', dest='hf_token', default=None, help='Hugging Face token for remote FF API. When set, uses the remote cfstats-umap-api Space instead of the local model.')
     parser_ff.set_defaults(func=lazy_cmd('ff', 'ff'), requires_licence=True)
 
     parser_nipt = subparsers.add_parser('nipt', prog="cfstats nipt", description="Perform typical NIPT analysis", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
@@ -177,6 +179,7 @@ def main():
 
     parser_fragmentome = subparsers.add_parser('fragmentome', prog="cfstats fragmentome", description="Start interactive fragmentome explorer web application (data is loaded from ClickHouse)", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_fragmentome.add_argument('--mapping', dest='mapping', default=None, help='Pickled (reducer, embedding, k) mapping as produced/used by cfstats dnase1l3 plot. Required for upload-to-embedding functionality.')
+    parser_fragmentome.add_argument('--hf-token', dest='hf_token', default=None, help='Hugging Face token for remote UMAP API. When set, uses the remote cfstats-umap-api Space instead of downloading the 3.5 GB model locally.')
     parser_fragmentome.add_argument('--ch-host', dest='ch_host', default='localhost', help='ClickHouse server host.')
     parser_fragmentome.add_argument('--ch-port', dest='ch_port', default=8123, type=int, help='ClickHouse HTTP port.')
     parser_fragmentome.add_argument('--admin-password', dest='admin_password', default=None, help='Password for the /admin upload page. If omitted, uses FRAGMENTOME_ADMIN_PASSWORD env var.')
