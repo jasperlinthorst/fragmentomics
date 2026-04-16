@@ -32,7 +32,7 @@ def get_hf_model_path(filename, repo_id=None):
     return local_path
 
 
-HF_SPACE_ID = "jasperlinthorst/cfstats-umap-api"
+HF_SPACE_ID = "jasperlinthorst/cfstats-predict"
 
 
 def remote_umap_transform(features, hf_token, space_id=None):
