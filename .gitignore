@@ -1,18 +1,18 @@
-build/lib/cfstats/__main__.py
-build/lib/cfstats/__init__.py
-cfstats.egg-info/dependency_links.txt
-cfstats.egg-info/entry_points.txt
-cfstats.egg-info/PKG-INFO
-cfstats.egg-info/SOURCES.txt
-cfstats.egg-info/top_level.txt
-dist/cfstats-0.1-py3.7.egg
-build/*
-dist/*
-*.png
-tri.1M.tsv
-test.tsv
-data/reference.w1000000.q1.F1024.tsv
+build/
+dist/
+cfstats.egg-info/
+__pycache__/
 *.pyc
+*.pyo
+
+# Model files (hosted on HF Hub, not in this repo)
+*.pkl
+*.pickle
+*.joblib
+*.whl
+
+# Data & alignment files
+*.png
 *.h5ad
 *.bam
 *.bam.bai
@@ -21,6 +21,18 @@ data/reference.w1000000.q1.F1024.tsv
 *.h5
 *.graphml
 *.csv
+*.fa
+*.fa.fai
 *.swp
 .DS_Store
+
+# Sensitive / local
+*token*.txt
 uploads/
+hf_space/
+hf_test_space/
+
+# Misc data
+tri.1M.tsv
+test.tsv
+data/reference.w1000000.q1.F1024.tsv
