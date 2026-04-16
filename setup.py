@@ -7,7 +7,6 @@ setup(
     name='cfstats', author="Jasper Linthorst", author_email="jasper.linthorst@gmail.com",
     version='0.1',
     packages=find_packages(),
-    package_data={'cfstats': ['models/*.joblib', 'models/*.pickle']},
     include_package_data=True,
     install_requires=[
         "numpy==2.0.0",
