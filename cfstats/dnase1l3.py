@@ -69,7 +69,9 @@ def plot_fragmentome(args):
         sys.stderr.write("Error: --mapping is required for plot_fragmentome.\n")
         sys.exit(1)
 
-    (reducer,embedding,k)=pickle.load(open(args.mapping, 'rb'))
+    mapping = joblib.load(args.mapping)
+    reducer = mapping[0]
+    embedding = reducer.embedding_
 
 
     args.k=4

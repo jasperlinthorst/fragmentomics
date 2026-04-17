@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import pickle
+import joblib
 import copy
 import time
 import warnings
@@ -106,26 +107,48 @@ def explore(args):
         if mapping_path is None:
             log.info('No --mapping provided; attempting to download UMAP model from Hugging Face Hub')
             try:
-                mapping_path = get_hf_model_path('umap_all_py3.7.9_2018_2019_2020_2021_2022.pkl')
+                mapping_path = get_hf_model_path('UMAP_all_freq.joblib')
             except Exception as e:
                 log.warning('Failed to download UMAP model from HF Hub: %s', e)
                 mapping_path = None
         if mapping_path:
             log.info('Loading mapping from: %s', mapping_path)
-            mapping = pickle.load(open(mapping_path, 'rb'))
+            mapping = joblib.load(mapping_path)
             reducer = mapping[0]
-            embedding = mapping[1]
-            mapping_k = mapping[2]
+            mapping_k = 4
             log.info('Mapping loaded successfully (k=%s)', mapping_k)
         else:
             log.warning('No mapping available. Upload-to-embedding functionality will be disabled.')
     
     admin_password = getattr(args, 'admin_password', None) or os.environ.get('FRAGMENTOME_ADMIN_PASSWORD')
 
-    app = dash.Dash("Fragmentome explorer", suppress_callback_exceptions=True)
+    app = dash.Dash("Fragmentome explorer", suppress_callback_exceptions=True,
+                    assets_folder=os.path.join(os.path.dirname(__file__), 'assets'))
 
     upload_max_size = 3 * 1024 * 1024 * 1024
     app.server.config['MAX_CONTENT_LENGTH'] = upload_max_size
+
+    # Server-side dict for streaming uploads: token -> {path, filename}
+    _streaming_uploads = {}
+
+    @app.server.route('/api/upload-file', methods=['POST'])
+    def api_upload_file():
+        """Accept a streamed file upload via multipart/form-data and save to disk."""
+        f = request.files.get('file')
+        if f is None:
+            return jsonify({'error': 'No file provided'}), 400
+        filename = f.filename or 'upload'
+        ext = os.path.splitext(filename)[1].lower()
+        uploads_dir = os.path.join(os.getcwd(), 'uploads')
+        os.makedirs(uploads_dir, exist_ok=True)
+        tmp = tempfile.NamedTemporaryFile(prefix='upload_', suffix=ext, dir=uploads_dir, delete=False)
+        tmp_path = tmp.name
+        tmp.close()
+        f.save(tmp_path)
+        token = uuid.uuid4().hex
+        _streaming_uploads[token] = {'path': tmp_path, 'filename': filename}
+        log.info('Streaming upload saved: %s -> %s (token=%s)', filename, tmp_path, token)
+        return jsonify({'token': token, 'filename': filename})
 
     app.layout = html.Div([
         dcc.Location(id='url', refresh=False),
@@ -135,6 +158,9 @@ def explore(args):
         dcc.Store(id='filter-indices', data=[]),
         dcc.Store(id='filters-store', data=[]),
         dcc.Store(id='hist-quantiles', data=4),
+        dcc.Store(id='alignment-upload-result', data=None),
+        dcc.Store(id='tsv-upload-result', data=None),
+        dcc.Interval(id='upload-poll', interval=500, n_intervals=0),
         html.Div(id='page-content'),
     ])
 
@@ -280,22 +306,34 @@ def explore(args):
             type="default"
         ),
 
-        dcc.Upload(
-            id='upload-alignment',
-            children=html.Div(['Drag and Drop or ', html.A('Select BAM/SAM/CRAM')]),
-            max_size=upload_max_size,
-            style={
-                'width': '20%',
-                'height': '60px',
-                'lineHeight': '60px',
-                'borderWidth': '1px',
-                'borderStyle': 'dashed',
-                'borderRadius': '5px',
-                'textAlign': 'center',
-                'margin': '10px'
-            },
-            multiple=False
-        ),
+        html.Div([
+            html.Div(
+                ['Drag and Drop or ', html.A('Select BAM/SAM/CRAM')],
+                id='alignment-dropzone',
+                style={
+                    'width': '300px',
+                    'height': '60px',
+                    'lineHeight': '60px',
+                    'borderWidth': '1px',
+                    'borderStyle': 'dashed',
+                    'borderRadius': '5px',
+                    'textAlign': 'center',
+                },
+            ),
+            html.Div([
+                html.Label('Subsample reads:', style={'fontSize': '12px', 'marginBottom': '2px'}),
+                dcc.Input(
+                    id='subsample-reads-input',
+                    type='number',
+                    value=100000,
+                    min=1000,
+                    step=10000,
+                    style={'width': '110px', 'fontSize': '12px', 'padding': '4px'},
+                ),
+                html.Div('Files >10 MB are subsampled genome-wide before upload.',
+                         style={'fontSize': '11px', 'color': '#888', 'marginTop': '2px'}),
+            ], style={'display': 'flex', 'flexDirection': 'column', 'justifyContent': 'center', 'marginLeft': '12px'}),
+        ], style={'display': 'flex', 'alignItems': 'center', 'margin': '10px'}),
         html.Div(id='upload-status', style={'padding': '0px 10px 10px 10px'}),
 
         html.Div([
@@ -493,16 +531,14 @@ def explore(args):
                     ),
                 ], style={'display': 'flex', 'alignItems': 'center', 'marginBottom': '8px'}),
             ], style={'padding': '0 10px'}),
-            dcc.Upload(
-                id='admin-upload-meta-tsv',
-                children=html.Div(['Drag and Drop or ', html.A('Select TSV')]),
-                max_size=upload_max_size,
+            html.Div(
+                ['Drag and Drop or ', html.A('Select TSV')],
+                id='tsv-dropzone',
                 style={
                     'width': '60%', 'height': '50px', 'lineHeight': '50px',
                     'borderWidth': '1px', 'borderStyle': 'dashed', 'borderRadius': '5px',
                     'textAlign': 'center', 'margin': '10px'
                 },
-                multiple=False
             ),
             dcc.Store(id='admin-tsv-preview-store', data=None),
             dcc.Store(id='admin-import-token-store', data=None),
@@ -552,6 +588,37 @@ def explore(args):
         if pathname == '/admin':
             return admin_layout(bool(authenticated))
         return main_layout()
+
+    # ── Clientside callbacks: poll JS global variables for upload results ──
+    app.clientside_callback(
+        """
+        function(n) {
+            if (window._alignmentUploadResult) {
+                var r = window._alignmentUploadResult;
+                window._alignmentUploadResult = null;
+                return r;
+            }
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output('alignment-upload-result', 'data'),
+        Input('upload-poll', 'n_intervals'),
+    )
+
+    app.clientside_callback(
+        """
+        function(n) {
+            if (window._tsvUploadResult) {
+                var r = window._tsvUploadResult;
+                window._tsvUploadResult = null;
+                return r;
+            }
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output('tsv-upload-result', 'data'),
+        Input('upload-poll', 'n_intervals'),
+    )
 
     @app.callback(
         Output('filter-indices', 'data'),
@@ -741,23 +808,24 @@ def explore(args):
         Output('x-dropdown', 'value'),
         Output('y-dropdown', 'value'),
         Output('loading-status', 'children'),
-        Input('upload-alignment', 'contents'),
-        State('upload-alignment', 'filename'),
+        Input('alignment-upload-result', 'data'),
         State('x-dropdown', 'value'),
         State('y-dropdown', 'value'),
         State('uploaded-point', 'data')
     )
-    def handle_alignment_upload(contents, filename, current_x, current_y, existing_points):
+    def handle_alignment_upload(upload_result, current_x, current_y, existing_points):
         existing_points = existing_points or []
-        if contents is None:
-            log.info('User cancelled alignment upload')
+        if upload_result is None:
             return existing_points, '', current_x, current_y, 'Ready'
 
-        if not isinstance(contents, str):
-            return existing_points, f'Upload failed: unexpected contents type {type(contents)}.', current_x, current_y, 'Error: Invalid content type'
+        token = upload_result.get('token')
+        filename = upload_result.get('filename', 'upload')
 
-        # Show processing status before validation
-        processing_status = '🔄 Processing uploaded file...'
+        if not token or token not in _streaming_uploads:
+            return existing_points, 'Upload failed: invalid or expired upload token.', current_x, current_y, 'Error'
+
+        file_info = _streaming_uploads.pop(token)
+        out_path = file_info['path']
 
         if mapping is None:
             return existing_points, 'Upload disabled: start the app with --mapping <mapping.pkl> so I can compute x/y coordinates.', current_x, current_y, 'Error: Mapping not loaded'
@@ -765,59 +833,20 @@ def explore(args):
         if args.reference is None:
             return existing_points, 'Upload disabled: provide --reference <fasta> (required for motif features).', current_x, current_y, 'Error: Reference not provided'
 
-        try:
-            header, b64data = contents.split(',', 1)
-            data = base64.b64decode(b64data)
-        except Exception:
-            return existing_points, 'Upload failed: could not decode file contents.', current_x, current_y, processing_status
+        ext = os.path.splitext(filename)[1].lower() if filename else ''
+        if ext not in ['.bam', '.sam', '.cram']:
+            return existing_points, f'Upload failed: unsupported file type {ext}. Please upload .bam, .sam, or .cram.', current_x, current_y, 'Error'
 
-        ext = ''
-        if filename:
-            ext = os.path.splitext(filename)[1]
-        if ext.lower() not in ['.bam', '.sam', '.cram']:
-            return existing_points, f'Upload failed: unsupported file type {ext}. Please upload .bam, .sam, or .cram.', current_x, current_y, processing_status
-
-        log.info('Processing alignment upload: %s', filename)
+        log.info('Processing alignment upload: %s (from %s)', filename, out_path)
 
         try:
-            b64data = contents.split(',', 1)[1] if ',' in contents else contents
-            b64data = b64data.strip().replace('\n', '').replace('\r', '')
-            pad = (-len(b64data)) % 4
-            if pad:
-                b64data += '=' * pad
-
-            data = base64.b64decode(b64data)
-        except Exception as e:
-            return existing_points, f'Upload failed: could not decode file contents ({type(e).__name__}: {str(e)}).', current_x, current_y, processing_status
-
-        try:
-            uploads_dir = os.path.join(os.getcwd(), 'uploads')
-            os.makedirs(uploads_dir, exist_ok=True)
-
-            base = os.path.basename(filename) if filename else f'upload{ext}'
-            base = base.replace('\x00', '')
-            base = base.replace('/', '_').replace('\\', '_')
-            if not base.lower().endswith(ext.lower()):
-                base = base + ext
-
-            out_path = os.path.join(uploads_dir, base)
-            if os.path.exists(out_path):
-                root, e = os.path.splitext(base)
-                out_path = os.path.join(uploads_dir, f"{root}.{uuid.uuid4().hex[:8]}{e}")
-
-            with open(out_path, 'wb') as f_out:
-                f_out.write(data)
-
-            log.info('Uploaded file saved to: %s', out_path)
-            
-            # Update status to show processing
             log.info('Computing features for uploaded file (k=%s)', mapping_k)
             
             upload_args = copy.copy(args)
             upload_args.samfiles = [out_path]
             upload_args.bamlist = None
             upload_args.k = int(mapping_k)
-            upload_args.norm = 'rpx'
+            upload_args.norm = 'freq'
             upload_args.x = 1000000
             upload_args.exclflag = 3852
             upload_args.mapqual = 60
@@ -904,16 +933,19 @@ def explore(args):
     @app.callback(
         Output('admin-tsv-preview-store', 'data'),
         Output('admin-tsv-columns-div', 'children'),
-        Input('admin-upload-meta-tsv', 'contents'),
-        State('admin-upload-meta-tsv', 'filename'),
+        Input('tsv-upload-result', 'data'),
         prevent_initial_call=True
     )
-    def admin_analyze_tsv(contents, filename):
-        if contents is None:
+    def admin_analyze_tsv(upload_result):
+        if upload_result is None:
             return None, ''
+        token = upload_result.get('token')
+        filename = upload_result.get('filename', 'upload')
+        if not token or token not in _streaming_uploads:
+            return None, html.Div('Upload failed: invalid or expired upload token.', style={'color': 'red'})
+        file_path = _streaming_uploads[token]['path']
         try:
-            raw = _decode_upload_contents_to_bytes(contents)
-            columns, id_col = db.analyze_tsv_columns(ch_client, raw)
+            columns, id_col = db.analyze_tsv_columns(ch_client, file_path)
             log.info('Analyzed TSV %s: %d feature columns, id_col=%s', filename, len(columns), id_col)
 
             rows = []
@@ -1002,7 +1034,7 @@ def explore(args):
             ])
 
             store_data = {
-                'content_b64': base64.b64encode(raw).decode('ascii'),
+                'upload_token': token,
                 'filename': filename,
                 'column_names': [c['name'] for c in columns],
             }
@@ -1090,8 +1122,13 @@ def explore(args):
                                f'but you selected {chosen_type}.')
                         return None, True, {'display': 'none'}, '', err
 
-        raw = base64.b64decode(preview_data['content_b64'])
+        upload_token = preview_data.get('upload_token')
         filename = preview_data.get('filename', '?')
+        if not upload_token or upload_token not in _streaming_uploads:
+            return None, True, {'display': 'none'}, '', '✗ Upload expired. Please re-upload the file.'
+        file_info = _streaming_uploads.pop(upload_token)
+        tmp_path = file_info['path']
+
         token = uuid.uuid4().hex
         log.info('Admin confirmed TSV import: %s (%d/%d columns, %d renames, token=%s)',
                  filename, len(include_columns), len(col_types), len(rename_columns), token)
@@ -1101,17 +1138,22 @@ def explore(args):
                 import_client = db.get_fresh_client(
                     host=getattr(args, 'ch_host', 'localhost'),
                     port=getattr(args, 'ch_port', 8123))
-                db.upload_tsv_from_bytes(
-                    import_client, raw,
+                db.upload_meta_tsv(
+                    import_client, tmp_path,
                     feature_type=feat_type or None,
                     description=feat_description or None,
                     col_types=col_types,
-                    include_columns=include_columns,
+                    include_columns=include_columns if include_columns else None,
                     rename_columns=rename_columns if rename_columns else None,
                     progress_token=token)
             except Exception as exc:
                 log.exception('Background TSV import failed')
                 db._set_upload_progress(token, 0, 0, 0, f'error: {exc}')
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
         threading.Thread(target=_do_import, daemon=True).start()
 
@@ -1517,7 +1559,7 @@ def explore(args):
             upload_args.samfiles = [tmp_path]
             upload_args.bamlist = None
             upload_args.k = int(mapping_k)
-            upload_args.norm = 'rpx'
+            upload_args.norm = 'freq'
             upload_args.x = 1000000
             upload_args.exclflag = 3852
             upload_args.mapqual = 60
@@ -1894,6 +1936,7 @@ def explore(args):
                     custom_data=['_sample_id'],
                     labels={selected_color: selected_color},
                     title=f"Scatter plot colored by {selected_color} ({len(df_filtered)} points)",
+                    render_mode='webgl',
                 )
             else:
                 fig = px.scatter(
@@ -1906,6 +1949,7 @@ def explore(args):
                     custom_data=['_sample_id'],
                     labels={selected_color: selected_color},
                     title=f"Scatter plot colored by {selected_color} ({len(df_filtered)} points)",
+                    render_mode='webgl',
                 )
         else:
             fig = px.scatter(
@@ -1916,6 +1960,7 @@ def explore(args):
                 hover_data=[selected_x, selected_y],
                 custom_data=['_sample_id'],
                 title=f"Scatter plot ({len(df_filtered)} points)",
+                render_mode='webgl',
             )
 
         # fig.update_yaxes(scaleanchor='x', scaleratio=1)
@@ -1929,6 +1974,9 @@ def explore(args):
             fig.update_yaxes(type='log')
 
         if selected_x == 'umap1' and selected_y == 'umap2' and uploaded_point:
+            # Force all existing traces to WebGL so the SVG star renders on top
+            for trace in fig.data:
+                trace.update(type='scattergl')
             points_list = uploaded_point if isinstance(uploaded_point, list) else [uploaded_point]
             for pt in points_list:
                 if not isinstance(pt, dict) or 'umap1' not in pt or 'umap2' not in pt:
