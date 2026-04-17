@@ -46,6 +46,9 @@ cfstats dnase1l3 --hf-token $HF_TOKEN -r hg38.fa sample.cram
 cfstats ff --hf-token $HF_TOKEN -r hg38.fa sample.cram
 ```
 
+Prediction models are available through the Hugging Face Hub and can be accessed through an access token (the `--hf-token` flag). Contact j.linthorst@amsterdamumc.nl to get access.
+A demo of the models is available at https://huggingface.co/spaces/jasperlinthorst/cfstats-demo.
+
 ## Global options
 
 These flags apply to all subcommands:
