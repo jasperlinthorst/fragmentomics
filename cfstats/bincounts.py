@@ -93,7 +93,7 @@ def bincounts(args, cmdline=True):
             dfcnt=pd.DataFrame([v], columns=reflabels)
             gc_content = utils.get_gc_content(dfcnt, args.reference)
             dfcnt_corrected = utils.gc_correct_counts(dfcnt, gc_content, frac=args.frac)
-            v = dfcnt_corrected.iloc[0].values
+            v = dfcnt_corrected.iloc[0].values.copy()
             v[v<0]=0 #make sure gc corrected counts can not become negative 
 
         if not cmdline:
