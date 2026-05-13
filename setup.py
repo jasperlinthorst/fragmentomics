@@ -1,7 +1,43 @@
+import os
+import sys
 
-from setuptools import setup, find_packages
+from setuptools import setup, find_packages, Extension
 
-#install_requires = ["numpy","scikit-learn","pandas","biopython","matplotlib","seaborn","scipy","scanpy","anndata","gffutils","pysam","pyglmnet"],
+
+def _impute_extension():
+    try:
+        import numpy
+    except ImportError:  # pragma: no cover - build time
+        raise RuntimeError(
+            "numpy must be installed before building the cfstats C extension")
+
+    use_openmp = os.environ.get("OPENMP", "1") != "0"
+    extra_compile_args = []
+    extra_link_args = []
+    if use_openmp:
+        if sys.platform == "darwin":
+            # Apple clang needs libomp (`brew install libomp`) and the
+            # -Xpreprocessor flag to enable OpenMP.
+            extra_compile_args += ["-Xpreprocessor", "-fopenmp"]
+            extra_link_args += ["-lomp"]
+            # Help the compiler find libomp installed via Homebrew.
+            for prefix in ("/opt/homebrew/opt/libomp", "/usr/local/opt/libomp"):
+                if os.path.isdir(prefix):
+                    extra_compile_args += [f"-I{prefix}/include"]
+                    extra_link_args += [f"-L{prefix}/lib"]
+                    break
+        else:
+            extra_compile_args += ["-fopenmp"]
+            extra_link_args += ["-fopenmp"]
+
+    return Extension(
+        "cfstats.impute._hmm",
+        sources=["cfstats/impute/_hmm.c"],
+        include_dirs=[numpy.get_include()],
+        extra_compile_args=extra_compile_args,
+        extra_link_args=extra_link_args,
+    )
+
 
 setup(
     name='cfstats', author="Jasper Linthorst", author_email="jasper.linthorst@gmail.com",
@@ -26,6 +62,7 @@ setup(
         "plotly==6.5.2",
         "huggingface_hub>=0.20.0",
     ],
+    ext_modules=[_impute_extension()],
     entry_points={
         'console_scripts': [
             'cfstats=cfstats.__main__:main',
@@ -37,4 +74,3 @@ setup(
     ],
     python_requires='>=3.6',
 )
-
