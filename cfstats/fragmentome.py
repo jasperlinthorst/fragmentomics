@@ -412,7 +412,7 @@ def explore(args):
         html.Div([
             dcc.Checklist(
                 id='sort-motifs-by-deviation',
-                options=[{'label': 'Sort motif plots by |sample - cloud mean|', 'value': 'sort'}],
+                options=[{'label': 'Sort motif plots by |sample - population mean|', 'value': 'sort'}],
                 value=[],
                 inline=True,
             ),
@@ -1932,9 +1932,10 @@ def explore(args):
                     color=selected_color,
                     color_continuous_scale='Viridis',
                     template="plotly_white",
+                    hover_name='_sample_id',
                     hover_data=[selected_x, selected_y],
                     custom_data=['_sample_id'],
-                    labels={selected_color: selected_color},
+                    labels={selected_color: selected_color, '_sample_id': 'sample_id'},
                     title=f"Scatter plot colored by {selected_color} ({len(df_filtered)} points)",
                     render_mode='webgl',
                 )
@@ -1945,9 +1946,10 @@ def explore(args):
                     y=selected_y,
                     color=selected_color,
                     template="plotly_white",
+                    hover_name='_sample_id',
                     hover_data=[selected_x, selected_y],
                     custom_data=['_sample_id'],
-                    labels={selected_color: selected_color},
+                    labels={selected_color: selected_color, '_sample_id': 'sample_id'},
                     title=f"Scatter plot colored by {selected_color} ({len(df_filtered)} points)",
                     render_mode='webgl',
                 )
@@ -1957,8 +1959,10 @@ def explore(args):
                 x=selected_x,
                 y=selected_y,
                 template="plotly_white",
+                hover_name='_sample_id',
                 hover_data=[selected_x, selected_y],
                 custom_data=['_sample_id'],
+                labels={'_sample_id': 'sample_id'},
                 title=f"Scatter plot ({len(df_filtered)} points)",
                 render_mode='webgl',
             )
@@ -2158,12 +2162,19 @@ def explore(args):
                 html.Th("Field"),
                 html.Th("Value")
             ])),
-            html.Tbody([
-                html.Tr([
-                    html.Td(str(col)),
-                    html.Td(str(row[col]))
-                ]) for col in columns_to_show
-            ])
+            html.Tbody(
+                [
+                    html.Tr([
+                        html.Td("sample_id", style={'fontWeight': 'bold'}),
+                        html.Td(str(sample_id), style={'fontWeight': 'bold'})
+                    ])
+                ] + [
+                    html.Tr([
+                        html.Td(str(col)),
+                        html.Td(str(row[col]))
+                    ]) for col in columns_to_show
+                ]
+            )
         ])
 
     @app.callback(
@@ -2254,8 +2265,9 @@ def explore(args):
             'rgba(30, 136, 229, 1.0)',    # blue
         ]
 
-        def make_feature_comparison_figure(title, x_vals, col_names, sort_x_by_deviation=False, x_is_categorical=False):
-            log.debug('make_feature_comparison_figure: %s (n_samples=%d)', title, n_samples)
+        def make_feature_comparison_figure(title, x_vals, col_names, sort_x_by_deviation=False, x_is_categorical=False, plot_style='line'):
+            """Render feature comparison. plot_style='line' (fszd) or 'box' (parametric boxplot for CSM/5p)."""
+            log.debug('make_feature_comparison_figure: %s (n_samples=%d, style=%s)', title, n_samples, plot_style)
             fig_local = go.Figure()
 
             available = [c for c in col_names if c in df_sample_wide.columns]
@@ -2264,7 +2276,7 @@ def explore(args):
 
             x_vals_out = list(x_vals[:len(available)]) if len(x_vals) >= len(available) else list(range(len(available)))
 
-            # Population mean/std (blue band) — always shown
+            # Population mean/std — always needed
             mean_vals = None
             std_vals = None
             if not df_stats.empty:
@@ -2273,18 +2285,139 @@ def explore(args):
                 if std_vals is not None:
                     std_vals = std_vals.fillna(0.0)
 
-            # Sort by deviation from mean (use first sample for sort order)
+            present_ids = [sid for sid in sample_ids if sid in df_sample_wide.index]
+
+            # Pre-compute selection stats (needed for sorting when sort is on and for box rendering)
+            sel_mean_full = None
+            sel_std_full = None
+            if plot_style == 'box' and len(present_ids) >= 1 and mean_vals is not None:
+                sel_rows = []
+                for sid in present_ids:
+                    sel_rows.append(pd.to_numeric(df_sample_wide.loc[sid, available], errors='coerce').values)
+                if sel_rows:
+                    _arr = np.array(sel_rows, dtype=float)
+                    sel_mean_full = pd.Series(np.nanmean(_arr, axis=0), index=available)
+                    if len(present_ids) > 1:
+                        sel_std_full = pd.Series(np.nanstd(_arr, axis=0, ddof=1), index=available)
+                    else:
+                        sel_std_full = pd.Series(np.zeros(len(available)), index=available)
+
+            # Sort motif axis.
+            #   - If a selection exists (n_samples>=1), sort by |selection_mean - population_mean|
+            #     (difference of means between groups), which matches the new multi-sample boxplot semantic.
+            #   - Fallback (no selection stats yet): sort by |first_sample - pop_mean| / pop_std as before.
             if sort_x_by_deviation and mean_vals is not None:
-                first_sid = df_sample_wide.index[0]
-                y_first = pd.to_numeric(df_sample_wide.loc[first_sid, available], errors='coerce')
-                dev = (y_first - mean_vals.reindex(available)).abs()
+                if sel_mean_full is not None:
+                    pop_mean_r = mean_vals.reindex(available)
+                    dev = (sel_mean_full - pop_mean_r).abs()
+                else:
+                    first_sid = df_sample_wide.index[0]
+                    y_first = pd.to_numeric(df_sample_wide.loc[first_sid, available], errors='coerce')
+                    dev = ((y_first - mean_vals.reindex(available)) / std_vals).abs()
                 order = dev.sort_values(ascending=False).index.tolist()
                 x_by_col = dict(zip(available, x_vals_out))
                 x_vals_out = [x_by_col.get(col, str(col)) for col in order]
                 available = order
                 mean_vals = mean_vals.reindex(available)
                 std_vals = std_vals.reindex(available)
+                if sel_mean_full is not None:
+                    sel_mean_full = sel_mean_full.reindex(available)
+                    sel_std_full = sel_std_full.reindex(available)
 
+            if plot_style == 'box':
+                # Parametric boxplot: box = mean ± 1 SD, whiskers = ± 3 SD
+                if mean_vals is None or std_vals is None:
+                    return None
+                m = np.asarray(mean_vals.values, dtype=float)
+                s = np.asarray(std_vals.values, dtype=float)
+                if len(m) != len(x_vals_out) or len(s) != len(x_vals_out):
+                    return None
+
+                fig_local.add_trace(go.Box(
+                    x=x_vals_out,
+                    lowerfence=(m - 3 * s).tolist(),
+                    q1=(m - s).tolist(),
+                    median=m.tolist(),
+                    q3=(m + s).tolist(),
+                    upperfence=(m + 3 * s).tolist(),
+                    fillcolor='rgba(99, 110, 250, 0.25)',
+                    line={'color': 'rgba(99, 110, 250, 0.9)'},
+                    name='Population (mean ± 1/3 SD)',
+                    boxpoints=False,
+                    hoverinfo='x+name',
+                ))
+
+                safe_s = np.where(s > 0, s, np.nan)
+
+                if len(present_ids) <= 1:
+                    # Single sample: overlay as asterisk markers colored by z-score
+                    for idx, sid in enumerate(present_ids):
+                        y_vals = pd.to_numeric(df_sample_wide.loc[sid, available], errors='coerce').values.astype(float)
+                        with np.errstate(invalid='ignore', divide='ignore'):
+                            z = (y_vals - m) / safe_s
+                        colors = ['red' if (not np.isnan(zv) and abs(zv) > 3) else 'green' for zv in z]
+                        hover = [f"sample={sid}<br>feature={col}<br>value={y_vals[i]:.4g}<br>z={z[i]:.2f}"
+                                 for i, col in enumerate(available)]
+                        fig_local.add_trace(go.Scatter(
+                            x=x_vals_out,
+                            y=y_vals,
+                            mode='markers',
+                            marker=dict(symbol='asterisk', size=12,
+                                        color=colors,
+                                        line=dict(width=2, color=colors)),
+                            name=sid,
+                            text=hover,
+                            hoverinfo='text',
+                        ))
+                else:
+                    # Multiple samples: render a second parametric boxplot for the selection.
+                    # Split features into two traces (red/green) based on |sel_mean - pop_mean| > 3*pop_std
+                    sm = sel_mean_full.values.astype(float)
+                    ss = sel_std_full.values.astype(float)
+                    with np.errstate(invalid='ignore', divide='ignore'):
+                        z_group = (sm - m) / safe_s
+                    is_red = np.array([(not np.isnan(zv)) and (abs(zv) > 3) for zv in z_group])
+
+                    for mask, fill_rgba, line_rgba, label in (
+                        (is_red, 'rgba(239, 85, 59, 0.30)', 'rgba(239, 85, 59, 0.95)',
+                         f'Selection |Δmean|>3·SD (n={len(present_ids)})'),
+                        (~is_red, 'rgba(46, 160, 67, 0.30)', 'rgba(46, 160, 67, 0.95)',
+                         f'Selection |Δmean|≤3·SD (n={len(present_ids)})'),
+                    ):
+                        if not mask.any():
+                            continue
+                        xs = [x_vals_out[i] for i in range(len(x_vals_out)) if mask[i]]
+                        mm = sm[mask]
+                        ssd = ss[mask]
+                        fig_local.add_trace(go.Box(
+                            x=xs,
+                            lowerfence=(mm - 3 * ssd).tolist(),
+                            q1=(mm - ssd).tolist(),
+                            median=mm.tolist(),
+                            q3=(mm + ssd).tolist(),
+                            upperfence=(mm + 3 * ssd).tolist(),
+                            fillcolor=fill_rgba,
+                            line={'color': line_rgba},
+                            name=label,
+                            boxpoints=False,
+                            hoverinfo='x+name',
+                        ))
+
+                fig_local.update_layout(
+                    template='plotly_white',
+                    margin=dict(l=40, r=20, t=40, b=40),
+                    height=600,
+                    width=1000,
+                    legend=dict(orientation='h'),
+                    title=title,
+                    boxmode='overlay',
+                    showlegend=True,
+                )
+                if x_is_categorical:
+                    fig_local.update_xaxes(categoryorder='array', categoryarray=x_vals_out)
+                return fig_local
+
+            # plot_style == 'line' (fragment size distribution)
             # Draw population mean ± SD band (blue)
             if mean_vals is not None and std_vals is not None:
                 m = mean_vals.values
@@ -2313,11 +2446,7 @@ def explore(args):
                         )
                     )
 
-            # ── Plot samples ──
-            present_ids = [sid for sid in sample_ids if sid in df_sample_wide.index]
-
             if n_samples <= 5:
-                # Individual lines for each sample
                 for idx, sid in enumerate(present_ids):
                     y_vals = pd.to_numeric(df_sample_wide.loc[sid, available], errors='coerce')
                     color = _MULTI_COLORS[idx % len(_MULTI_COLORS)]
@@ -2331,7 +2460,6 @@ def explore(args):
                         )
                     )
             else:
-                # >5 samples: compute selection mean ± SD and plot in red
                 all_vals = []
                 for sid in present_ids:
                     row = pd.to_numeric(df_sample_wide.loc[sid, available], errors='coerce')
@@ -2366,7 +2494,8 @@ def explore(args):
             fig_local.update_layout(
                 template='plotly_white',
                 margin=dict(l=40, r=20, t=40, b=40),
-                height=320,
+                height=600,
+                width=1000,
                 legend=dict(orientation='h'),
                 title=title
             )
@@ -2385,14 +2514,14 @@ def explore(args):
                 children.append(dcc.Graph(figure=fig_fszd, config={'responsive': True}))
 
         if csm_col_names:
-            fig_csm = make_feature_comparison_figure('CSM features', csm_x, csm_col_names, sort_x_by_deviation=sort_motifs, x_is_categorical=True)
+            fig_csm = make_feature_comparison_figure('CSM features', csm_x, csm_col_names, sort_x_by_deviation=sort_motifs, x_is_categorical=True, plot_style='box')
             if fig_csm:
                 fig_csm.update_xaxes(title_text='Motif')
                 fig_csm.update_yaxes(title_text='Value')
                 children.append(dcc.Graph(figure=fig_csm, config={'responsive': True}))
 
         if p5_col_names:
-            fig_p5 = make_feature_comparison_figure("5' features", p5_x, p5_col_names, sort_x_by_deviation=sort_motifs, x_is_categorical=True)
+            fig_p5 = make_feature_comparison_figure("5' features", p5_x, p5_col_names, sort_x_by_deviation=sort_motifs, x_is_categorical=True, plot_style='box')
             if fig_p5:
                 fig_p5.update_xaxes(title_text='Motif')
                 fig_p5.update_yaxes(title_text='Value')
