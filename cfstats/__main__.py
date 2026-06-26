@@ -58,6 +58,7 @@ def main():
     global_parser.add_argument("-f", dest="reqflag", default=None, type=int, help="Sam file filter flag: have all of the FLAGs present (like samtools -f option)")
     global_parser.add_argument("-F", dest="exclflag", default=3852, type=int, help="Sam file filter flag: have none of the FLAGs present (like samtools -F option, but exclude duplicates and unmapped read by default)")
     global_parser.add_argument("-q", dest="mapqual", default=60, type=int, help="Minimal mapping quality of reads to be considered (like samtools -q option)")
+    global_parser.add_argument("--min-base-quality", dest="min_base_quality", default=17, type=int, help="Minimum base quality for a SNP in a read (default 17)")
     global_parser.add_argument("-x", dest="x", default=1000000, type=int, help="Normalisation unit, see norm")
     global_parser.add_argument("--nproc", dest="nproc", default=1, type=int, help="Number of parallel processes to use.")
     global_parser.add_argument("--norm", dest="norm", choices=['counts','freq','rpx'], default='counts', help="Normalize: report counts, frequencies or reads per X reads (default x=1000000, set X with -x option).")
@@ -185,78 +186,62 @@ def main():
     parser_fragmentome.add_argument('--admin-password', dest='admin_password', default=None, help='Password for the /admin upload page. If omitted, uses FRAGMENTOME_ADMIN_PASSWORD env var.')
     parser_fragmentome.set_defaults(func=lazy_cmd('fragmentome', 'explore'))
 
+    # --- imputeref: build and train reference model in one step ------------
+    parser_imputeref = subparsers.add_parser(
+        'imputeref', prog="cfstats imputeref",
+        description="Build reference panel from BAM/VCF files and train HMM model in one step.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
+    parser_imputeref.add_argument('targetfile', help='Target VCF (sites only) or .pos/.txt with chrom pos ref alt.')
+    parser_imputeref.add_argument('ifiles', nargs='+', help='.vcf(.gz)/.bcf/.bam/.sam/.cram or .txt manifests.')
+    parser_imputeref.add_argument('-k', dest='k', default=4, type=int, help='Number of HMM states.')
+    parser_imputeref.add_argument('--maxiter', dest='maxiter', default=40, type=int, help='EM iterations.')
+    parser_imputeref.add_argument('--warm-start', dest='warm_start', default=None, type=str,
+                                    help='Warm-start from a previously trained model VCF.')
+    parser_imputeref.add_argument('--maxvar', dest='maxvar', default=int(10e6), type=int, help='Max number of variants.')
+    parser_imputeref.add_argument('--region', dest='region', default=None, type=str, help='Restrict to region.')
+    parser_imputeref.add_argument('--outputprefix', dest='outputprefix', default=None, type=str, help='Output file prefix.')
+    parser_imputeref.add_argument('--addchr', dest='addchr', action='store_true', default=False)
+    parser_imputeref.add_argument('--rmchr', dest='rmchr', action='store_true', default=False)
+    parser_imputeref.add_argument('--filterflag', dest='filterflag', default=3840, type=int, help='Alignments to exclude (samtools -F).')
+    parser_imputeref.add_argument("--cram-reference", dest="cramref", default=None, type=str, help="Reference FASTA for CRAM decoding.")
+    parser_imputeref.add_argument('--ngen', dest='ngen', type=int, default=100, help='Generations since founding.')
+    parser_imputeref.set_defaults(func=lazy_cmd('impute.cli', 'imputeref'))
+
     # --- impute: genotype imputation (diploid / NIPT triploid) -----------
-    # Three sub-modes:
-    #   cfstats impute run <ref> <input> <chrom>     - run imputation
-    #   cfstats impute build-reference <target> <f>+  - build reference pickle
-    #   cfstats impute train <pickle>                 - EM-train HMM model
+    # Direct imputation using a reference panel (no subcommand needed)
     parser_impute = subparsers.add_parser(
         'impute', prog="cfstats impute",
-        description="Genotype imputation: run imputation, or build/train a custom reference.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    impute_subs = parser_impute.add_subparsers(dest='impute_cmd',
-        help='Sub-command (default: run)')
-
-    # --- impute run ---
-    parser_imp_run = impute_subs.add_parser(
-        'run', prog="cfstats impute run",
-        description="Impute genotypes from a BAM/CRAM using a phased population reference panel.",
+        description="Impute genotypes from a BAM/CRAM using a phased population reference panel (trained model VCF, or standard hap/legend).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
-    parser_imp_run.add_argument('impute_reference', help='Phased reference vcf(.gz)/bcf, or the prefix of a hap.gz/legend.gz pair.')
-    parser_imp_run.add_argument('input', help='Input sam/bam/cram with reads.')
-    parser_imp_run.add_argument('chrom', help='Chromosome to impute (as it appears in the reference VCF).')
-    parser_imp_run.add_argument("--start", dest="start", default=None, type=int, help="Start position (VCF reference only).")
-    parser_imp_run.add_argument("--stop", dest="stop", default=None, type=int, help="End position (VCF reference only).")
-    parser_imp_run.add_argument("--impute-output", dest="output", default='-', type=str, help="Output (bgzipped) VCF; '-' writes to stdout.")
-    parser_imp_run.add_argument("--sample", dest="sample", default=None, type=str, help="Sample name in the output VCF (defaults to the input basename).")
-    parser_imp_run.add_argument("--addchr", dest="addchr", action="store_true", default=False, help="Prefix 'chr' to contig names when fetching from the input.")
-    parser_imp_run.add_argument("--rmchr", dest="rmchr", action="store_true", default=False, help="Strip 'chr' prefix from contig names when fetching from the input.")
-    parser_imp_run.add_argument("--cram-reference", dest="cramref", default=None, type=str, help="Reference FASTA for CRAM decoding.")
-    parser_imp_run.add_argument("--ngen", dest="ngen", type=int, default=100, help="Generations since founding the reference population.")
-    parser_imp_run.add_argument("--avgr", dest="avgr", type=int, default=1, help="Average recombination rate in cM/Mb.")
-    parser_imp_run.add_argument("--minp", dest="minp", type=float, default=1e-3, help="Minimum probability (prevents underflow in fwd/bwd).")
-    parser_imp_run.add_argument("--diploid", dest="diploid", action="store_true", default=False, help="Diploid model (2 haplotypes) instead of NIPT triploid model.")
-    parser_imp_run.add_argument("--ff", dest="ff", default=0.1, type=float, help="Expected fetal fraction prior (triploid mode only).")
-    parser_imp_run.add_argument("--nhap", dest="nhap", default=None, type=int, help="Pre-select the best-matching N haplotypes (None = use all).")
-    parser_imp_run.add_argument("--fulliter", dest="gibbs_fulliter", type=int, default=3, help="Diploid: mean-field iterations. Triploid: full-panel selection passes.")
-    parser_imp_run.add_argument("--partiter", dest="gibbs_partiter", type=int, default=None, help="Max label-reassignment iterations (triploid; None = until convergence).")
-    parser_imp_run.add_argument("--maxnreads", dest="maxnreads", type=int, default=None, help="Limit the total number of reads considered.")
-    parser_imp_run.add_argument("--nthreads", dest="nthreads", type=int, default=None, help="OpenMP threads and per-label fwd/bwd pool size (default: --nproc).")
-    def _impute_run(args):
-        args.reference = args.impute_reference
-        from cfstats.impute.cli import impute_ref
-        return impute_ref(args)
-    parser_imp_run.set_defaults(func=_impute_run)
-
-    # --- impute build-reference ---
-    parser_imp_build = impute_subs.add_parser(
-        'build-reference', prog="cfstats impute build-reference",
-        description="Preprocess BAM/VCF files against target sites into a reference pickle for training.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
-    parser_imp_build.add_argument('targetfile', help='Target VCF (sites only is fine) or .pos/.txt with chrom pos ref alt.')
-    parser_imp_build.add_argument('ifiles', nargs='+', help='.vcf(.gz)/.bcf/.bam/.sam/.cram or .txt manifests.')
-    parser_imp_build.add_argument('--maxvar', dest='maxvar', default=int(10e6), type=int, help='Max number of variants.')
-    parser_imp_build.add_argument('--region', dest='region', default=None, type=str, help='Restrict to region.')
-    parser_imp_build.add_argument('--outputprefix', dest='outputprefix', default=None, type=str, help='Output file prefix.')
-    parser_imp_build.add_argument('--addchr', dest='addchr', action='store_true', default=False)
-    parser_imp_build.add_argument('--rmchr', dest='rmchr', action='store_true', default=False)
-    parser_imp_build.add_argument('--filterflag', dest='filterflag', default=3840, type=int, help='Alignments to exclude (samtools -F).')
-    parser_imp_build.add_argument("--cram-reference", dest="cramref", default=None, type=str, help="Reference FASTA for CRAM decoding.")
-    parser_imp_build.set_defaults(func=lazy_cmd('impute.cli', 'build_reference'))
-
-    # --- impute train ---
-    parser_imp_train = impute_subs.add_parser(
-        'train', prog="cfstats impute train",
-        description="EM-train an HMM model from a reference pickle produced by build-reference.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
-    parser_imp_train.add_argument('reference_pickle', help='Reference pickle from build-reference.')
-    parser_imp_train.add_argument('-k', dest='k', default=4, type=int, help='Number of HMM states.')
-    parser_imp_train.add_argument('--outputprefix', dest='outputprefix', default=None, type=str)
-    parser_imp_train.add_argument('--maxiter', dest='maxiter', default=40, type=int)
-    parser_imp_train.add_argument('--initmodel', dest='initmodel', default=None, type=str, help='Warm-start from a previously trained model.')
-    parser_imp_train.add_argument('--ngen', dest='ngen', type=int, default=100)
-    parser_imp_train.add_argument('-i', '--interactive', dest='interactive', action='store_true', default=False)
-    parser_imp_train.set_defaults(func=lazy_cmd('impute.cli', 'train'))
+    parser_impute.add_argument('reference', help='Phased reference VCF (.vcf.gz), trained model VCF from imputeref, or prefix of hap.gz/legend.gz pair.')
+    parser_impute.add_argument('input', help='Input sam/bam/cram with reads.')
+    parser_impute.add_argument('chrom', help='Chromosome to impute (as it appears in the reference VCF).')
+    parser_impute.add_argument("--start", dest="start", default=None, type=int, help="Start position (VCF reference only).")
+    parser_impute.add_argument("--stop", dest="stop", default=None, type=int, help="End position (VCF reference only).")
+    parser_impute.add_argument("--impute-output", dest="output", default='-', type=str, help="Output (bgzipped) VCF; '-' writes to stdout.")
+    parser_impute.add_argument("--sample", dest="sample", default=None, type=str, help="Sample name in the output VCF (defaults to the input basename).")
+    parser_impute.add_argument("--addchr", dest="addchr", action="store_true", default=False, help="Prefix 'chr' to contig names when fetching from the input.")
+    parser_impute.add_argument("--rmchr", dest="rmchr", action="store_true", default=False, help="Strip 'chr' prefix from contig names when fetching from the input.")
+    parser_impute.add_argument("--cram-reference", dest="cramref", default=None, type=str, help="Reference FASTA for CRAM decoding.")
+    parser_impute.add_argument("--ngen", dest="ngen", type=int, default=100, help="Generations since founding the reference population.")
+    parser_impute.add_argument("--avgr", dest="avgr", type=int, default=1, help="Average recombination rate in cM/Mb.")
+    parser_impute.add_argument("--minp", dest="minp", type=float, default=1e-3, help="Minimum probability (prevents underflow in fwd/bwd).")
+    parser_impute.add_argument("--diploid", dest="diploid", action="store_true", default=False, help="Diploid model (2 haplotypes) instead of NIPT triploid model.")
+    parser_impute.add_argument("--ff", dest="ff", default=0.1, type=float, help="Expected fetal fraction prior (triploid mode only).")
+    parser_impute.add_argument("--nhap", dest="nhap", default=None, type=int, help="Pre-select the best-matching N haplotypes (None = use all).")
+    parser_impute.add_argument("--random-init", dest="random_init", action="store_true", default=False, help="Use random initial haplotype selection with iterative posterior-guided re-selection (no msPBWT).")
+    parser_impute.add_argument("--gibbs", dest="gibbs", action="store_true", default=False, help="Diploid only: use Gibbs sampling on read labels instead of the default mean-field conditioning. Reads are randomly assigned to hap1/hap2, separate fwd/bwd passes are run per haplotype, and read labels are hard-resampled from the posterior each iteration.")
+    parser_impute.add_argument("--knew", dest="knew", default=None, type=int, help="Number of new haplotypes to add per iteration when using random-init (default: nhap).")
+    parser_impute.add_argument("--fulliter", dest="gibbs_fulliter", type=int, default=3, help="Diploid: mean-field iterations. Triploid: full-panel selection passes.")
+    parser_impute.add_argument("--partiter", dest="gibbs_partiter", type=int, default=None, help="Max label-reassignment iterations (triploid; None = until convergence).")
+    parser_impute.add_argument("--maxnreads", dest="maxnreads", type=int, default=None, help="Limit the total number of reads considered.")
+    parser_impute.add_argument("--nthreads", dest="nthreads", type=int, default=None, help="OpenMP threads and per-label fwd/bwd pool size (default: --nproc).")
+    parser_impute.add_argument("--genetic-map", dest="genetic_map", type=str, default=None, help="Path to a (gzipped) PLINK-format genetic map file (columns: position COMBINED_rate Genetic_Map.cM). When provided, sigma is computed from interpolated genetic distances instead of a uniform recombination rate.")
+    parser_impute.add_argument("--nophase", dest="nophase", action="store_true", default=False, help="Disable the phasing iteration (default: phasing is on). When phasing is on, a final forward-backward pass warm-started from converged read assignments produces phased GT (0|0, 0|1, 1|0, 1|1) with DS/GP recomputed from recast haplotypes.")
+    parser_impute.add_argument("--dump", dest="dump", type=str, default=None, help="Dump gamma/emission/sigma/hap-path matrices for each iteration to this path prefix (e.g. 'cfstats_dump'). Files: <prefix>_iter<N>_hap<1|2>.npz")
+    parser_impute.add_argument("--read-prior", dest="read_prior", action="store_true", default=False, help="Triploid only: use a per-read fetal prior decoded from the per-read tag (default XF, written by the read classifier) to steer the Gibbs read labelling, instead of the global --ff binomial prior. w_i = 10**(-XF/10).")
+    parser_impute.add_argument("--read-prior-tag", dest="read_prior_tag", type=str, default="XF", help="SAM tag holding the Phred-encoded per-read fetal posterior used by --read-prior.")
+    parser_impute.set_defaults(func=lazy_cmd('impute.cli', 'impute_ref'))
 
     args = parser.parse_args()
 

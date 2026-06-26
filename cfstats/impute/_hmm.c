@@ -1,11 +1,83 @@
 /*
+ * Hidden Markov Model (HMM) Forward-Backward Implementation
  *
-*/
+ * This module implements the core Li & Stephens haplotype model for genotype
+ * imputation. The model treats each target haplotype as a mosaic of K reference
+ * haplotypes, where transitions between states follow a coalescent process with
+ * recombination.
+ *
+ * Core Algorithm: Forward-Backward (FB) for HMMs
+ * ------------------------------------------------
+ * The FB algorithm computes posterior probabilities P(state | data) by:
+ * 1. Forward pass:  alpha[t,s] = P(obs_1..t, state_s @ t)
+ * 2. Backward pass: beta[t,s]  = P(obs_t+1..T | state_s @ t)
+ * 3. Combine:      gamma[t,s] = alpha[t,s] * beta[t,s] / P(data)
+ *
+ * Array Layouts and Variable Naming
+ * ----------------------------------
+ * k (int): Number of hidden states (reference haplotypes or latent clusters)
+ * n (int): Number of genetic variants (sites, SNPs)
+ * N (int): Number of reference samples (for training)
+ *
+ * g (uint8_t*, shape k*n): Emission matrix. g[i*n+t] is allele of reference
+ *     haplotype i at position t (0=ref, 1=alt). Row-major: [hap0_site0,
+ *     hap0_site1, ..., hap1_site0, hap1_site1, ...].
+ *
+ * y (uint8_t*, shape 2*n): Observed diploid genotypes. y[t*2+0] = ref count,
+ *     y[t*2+1] = alt count at position t. For reads: [0,1] or [1,0] for single
+ *     observations, [0,2] or [2,0] for homozygous, [1,1] for het.
+ *
+ * s (double*, shape n-1): Recombination probabilities. s[t] = P(no recombination
+ *     between sites t and t+1). Under Li-Stephens: s[t] = exp(-4*Ne*r*d[t])
+ *     where d[t] is genetic distance in Morgans.
+ *
+ * a (double*, shape k*n-1): Transition matrix. a[i*n+t] = P(state=i @ t+1 |
+ *     state @ t). Actually encodes: P(state=i) * (1-s[t]) + s[t] * P(colescence).
+ *     Columns sum to 1. For Li-Stephens: a[i,t] ~ 1/k * (1-s[t]) + s[t] * delta.
+ *
+ * start (double*, shape k): Initial state probabilities P(state @ position 0).
+ *     Usually uniform 1/k.
+ *
+ * alpha (double*, shape k*n): Forward probabilities. Stored row-major:
+ *     alpha[i*n+t] = P(obs_1..t, state=i @ t). Computed left-to-right.
+ *
+ * beta (double*, shape k*n): Backward probabilities. beta[i*n+t] =
+ *     P(obs_t+1..n | state=i @ t). Computed right-to-left.
+ *
+ * c (double*, shape n): Scaling coefficients for log-likelihood. c[t] =
+ *     sum_i(alpha[i,t]). The log-likelihood is sum(log(c[t])). This prevents
+ *     underflow in long sequences.
+ *
+ * C_ (double*, shape k*k*n): Pairwise marginal probabilities for EM training.
+ *     C_[(i*k+j)*n+t] = P(state=i @ t, state=j @ t+1 | data). Used to
+ *     compute expected transition counts in Baum-Welch.
+ *
+ * Parallelization Strategy
+ * -------------------------
+ * OpenMP is used to parallelize the inner loop over states (k) in both forward
+ * and backward passes. The algorithm releases the Python GIL for true parallelism.
+ * Each thread handles a subset of states, with reductions for summations.
+ *
+ * Two Precision Modes
+ * --------------------
+ * Standard (Haploid) mode: Uses uint8 emission g[i,t] in {0,1}. Memory efficient
+ *   for large reference panels (1000s of haplotypes).
+ *
+ * Double precision mode: Uses float64 emission g[i,t] in [0,1]. Required for
+ *   diploid mean-field inference where emissions encode expected contributions:
+ *   g[i,t] = 0.5 * P(alt|hap_i,t) + 0.5 * P(alt|sampled_other_hap,t).
+ */
 
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <Python.h>
 #include <math.h>
 #include <numpy/arrayobject.h>
+
+/* numpy 2.0 compatibility: these macros now require PyArrayObject* instead of PyObject* */
+#define NPY_ARRAY_DATA(arr) PyArray_DATA((PyArrayObject*)(arr))
+#define NPY_ARRAY_DIMS(arr) PyArray_DIMS((PyArrayObject*)(arr))
+#define NPY_ARRAY_FILLWBYTE(arr, val) PyArray_FILLWBYTE((PyArrayObject*)(arr), (val))
+#define NPY_ARRAY_NDIM(arr) PyArray_NDIM((PyArrayObject*)(arr))
 
 #ifdef _OPENMP
 # include <omp.h>
@@ -24,11 +96,34 @@
 // #define logadd(X, Y) ((X) > (Y) ? X+log(1+exp((Y)-(X))) : Y+log(1+exp((X)-(Y))))
 // #define logsub(X, Y) ((X) > (Y) ? X+log(1-exp((Y)-(X))) : Y+log(1-exp((X)-(Y))))
 
+/*
+ * Compute emission probabilities for diploid genotype y at position t.
+ *
+ * This computes P(y[t] | state=(i,j)) where state is the pair of maternal
+ * and paternal haplotypes. Under the model, each read comes from either
+ * haplotype with equal probability 0.5, so:
+ *
+ *   P(y | i,j) = 0.5 * P(y | i) + 0.5 * P(y | j)
+ *
+ * For a single observation y=[y_ref, y_alt], P(y | hap_i) follows binomial:
+ *   P(y | hap_i) = (1-g[i,t])^y_ref * g[i,t]^y_alt
+ *
+ * Parameters:
+ *   g: emission matrix (k x n) float64, g[i*n+t] = P(alt | state=i @ t)
+ *   y: observations (2 x n) uint8, [ref_count, alt_count] at each site
+ *   k: number of states
+ *   n: number of sites
+ *   t: current position (0-indexed)
+ *   e: output buffer (k*k) for pairwise emission probs, e[i*k+j] = P(y|i,j)
+ */
 void emission(double *g, uint8_t *y, int k, int n, int t, double* e) {
     double pobs;
     int i,j;
     for(i=0; i<k; i++){
         for(j=0; j<k; j++){
+            /* P(y|i) = (1-g[i,t])^ref * g[i,t]^alt for haplotype i */
+            /* P(y|j) = (1-g[j,t])^ref * g[j,t]^alt for haplotype j */
+            /* P(y|i,j) = 0.5*P(y|i) + 0.5*P(y|j) for diploid observation */
             pobs= 0.5*( pow(1-g[i*n+t],y[t*2]) * pow(g[i*n+t],y[t*2+1]) ) + \
                   0.5*( pow(1-g[j*n+t],y[t*2]) * pow(g[j*n+t],y[t*2+1]) );
             e[(i*k)+j]=pobs;
@@ -36,13 +131,37 @@ void emission(double *g, uint8_t *y, int k, int n, int t, double* e) {
     }
 }
 
-void _backwardHaploid(int k, int n, uint8_t *y, double *s, uint8_t *g, double *beta, double *c, int scaleto, int nthreads) {
+/*
+ * Backward pass for haploid HMM with uint8 emissions.
+ *
+ * Computes beta[i,t] = P(obs_{t+1}..obs_{n-1} | state=i @ t) recursively:
+ *   beta[t] = sum_{i'} P(obs_{t+1} | i') * trans[i->i'] * beta[t+1, i']
+ *
+ * Under Li-Stephens, transition is:
+ *   P(i->i') = sigma[t] * delta(i=i') + (1-sigma[t]) * (1/k)
+ * where sigma[t] = P(no recombination between t and t+1).
+ *
+ * The algorithm incorporates emission probabilities directly using:
+ *   e[i] = P(obs_{t+1} | hap_i) = (1-g[i,t+1])^ref * g[i,t+1]^alt
+ *
+ * Parameters:
+ *   k: number of states (reference haplotypes)
+ *   n: number of variants
+ *   y: observations (2 x n), y[t*2] = ref count, y[t*2+1] = alt count
+ *   s: recombination probabilities (n-1), s[t] = P(no recombination t->t+1)
+ *   g: emission matrix (k x n) uint8, g[i*n+t] = allele (0/1)
+ *   beta: output backward probabilities (k x n), beta[i*n+t] = P(data_{t+1}..|i@t)
+ *   c: scaling coefficients (n), for log-likelihood computation
+ *   scaleto: scaling mode (0=none, >0=scale to this value)
+ *   nthreads: OpenMP thread count
+ */
+void _backwardHaploid(int k, int n, uint8_t *y, double *s, uint8_t *g, double *beta, double *c, int scaleto, int nthreads, double *alphaMat, double minp) {
     int i;
     double *eb=(double *) malloc(k*sizeof(double));
     int t=n-1;
 
     if (scaleto>0){
-        c[t]=(double)scaleto; //(double)scaleto/(double)k;
+        c[t]=(double)scaleto;
     }
 
     for(i=0; i<k; i++){
@@ -53,11 +172,7 @@ void _backwardHaploid(int k, int n, uint8_t *y, double *s, uint8_t *g, double *b
         }
     }
 
-    bool warn=false;
     double colsum;
-    double minp=0.001;
-
-    unsigned int uf=0;
 
     for(t=n-2; t>=0; t--){
         colsum=0.0;
@@ -66,22 +181,18 @@ void _backwardHaploid(int k, int n, uint8_t *y, double *s, uint8_t *g, double *b
         #ifdef _OPENMP
         #pragma omp parallel for num_threads(nthreads) reduction(+:colsum)
         #endif
-        for(i=0; i<k; i++){ //init
+        for(i=0; i<k; i++){
             double e=pow(1- fabs(((double)g[i*n+(t+1)]-minp)),y[(t+1)*2]) * pow((double)fabs(((double)g[i*n+(t+1)])-minp),y[(t+1)*2+1]) ;
             eb[i] = beta[(i*n)+(t+1)] * e;
             colsum+= eb[i];
         }
 
         #ifdef _OPENMP
-        #pragma omp parallel for num_threads(nthreads) reduction(+:uf) reduction(max:cmax)
+        #pragma omp parallel for num_threads(nthreads) reduction(max:cmax)
         #endif
         for(i=0; i<k; i++){
-            double b = (eb[i] * s[t]) + (colsum * (1.0-s[t]) * (1.0/k));
-
-            if (b<DBL_MIN){
-                b=DBL_MIN; //cap to prevent zeros in case of very deep coverage or no scaling
-                uf++;
-            }
+            double am_i = (alphaMat != NULL) ? alphaMat[i*(n-1)+t] : (1.0/k);
+            double b = (eb[i] * s[t]) + (colsum * (1.0-s[t]) * am_i);
 
             beta[(i*n)+(t)] = b;
 
@@ -89,7 +200,6 @@ void _backwardHaploid(int k, int n, uint8_t *y, double *s, uint8_t *g, double *b
                 if (b>cmax) cmax=b;
             }
         }
-        if (uf>0) warn=true;
 
         //determine scaling factor
         if (scaleto!=0){
@@ -106,17 +216,30 @@ void _backwardHaploid(int k, int n, uint8_t *y, double *s, uint8_t *g, double *b
         }
     }
     free(eb);
-
-    if (warn==true){
-        fprintf(stderr, "WARNING: %d/%d (%.5f) underflow values in backward matrix capped to prevent zeros.\n",uf,(k*n),( (double) uf/ (double) (k*n)));
-    }
 }
 
-void _forwardHaploid(int k, int n, uint8_t *y, double *nu, double *s, uint8_t *g, double *alpha, double *c, unsigned int scaleto, int nthreads) {
+/*
+ * Forward pass for haploid HMM with uint8 emissions.
+ *
+ * Computes alpha[i,t] = P(obs_0..t, state=i @ t) recursively:
+ *   alpha[t] = emission(y[t]) * sum_{states @ t-1} alpha[t-1] * trans[state->i]
+ *
+ * Parameters:
+ *   k: number of states (reference haplotypes)
+ *   n: number of variants
+ *   y: observations (2 x n), [ref_count, alt_count] at each site
+ *   nu: initial state probabilities (k)
+ *   s: recombination probabilities (n-1), s[t] = P(no recombination t->t+1)
+ *   g: emission matrix (k x n) uint8, haplotype alleles
+ *   alpha: output forward probabilities (k x n), alpha[i*n+t] = P(data_0..t, state=i@t)
+ *   c: scaling coefficients (n)
+ *   scaleto: scaling mode
+ *   nthreads: OpenMP thread count
+ */
+void _forwardHaploid(int k, int n, uint8_t *y, double *nu, double *s, uint8_t *g, double *alpha, double *c, unsigned int scaleto, int nthreads, double *alphaMat, double minp) {
     int i,t=0;
     double *z=(double *) malloc(k*sizeof(double));
     double colsum;
-    double minp=0.001;
 
     c[t]=0.0;
     double ct=0.0;
@@ -142,42 +265,35 @@ void _forwardHaploid(int k, int n, uint8_t *y, double *nu, double *s, uint8_t *g
     }
 
     colsum=(double)scaleto; //by definition if we use scaling
-    bool warn=false;
-    unsigned int uf=0;
 
     for(t=1; t<n; t++){
         ct=0.0;
 
         if (scaleto==0){ //no scaling!
             colsum=0.0;
-            for(i=0; i<k; i++) { //init
+            for(i=0; i<k; i++) {
                 colsum+=alpha[(i*n)+(t-1)];
             }
         }
 
         #ifdef _OPENMP
-        #pragma omp parallel for num_threads(nthreads) reduction(+:ct,uf)
+        #pragma omp parallel for num_threads(nthreads) reduction(+:ct)
         #endif
         for(i=0; i<k; i++){
             //no recomb
             double zi = alpha[(i*n)+(t-1)] * s[t-1]; //p of no recomb between pos t-1 and t
 
             //recomb
-            zi += colsum * (1.0-s[t-1]) * (1.0/k); //p of recomb of first allele between pos t-1 and t;
+            double am_i = (alphaMat != NULL) ? alphaMat[i*(n-1)+(t-1)] : (1.0/k);
+            zi += colsum * (1.0-s[t-1]) * am_i; //p of recomb to state i between pos t-1 and t
 
             double e=pow(1-fabs(((double)g[i*n+t])-minp),y[t*2]) * pow(fabs(((double)g[i*n+t])-minp),y[t*2+1]);
 
             zi *= e; //emission of y[t*2] and y[t*2+1] in state i
 
-            if (zi < DBL_MIN){
-                zi = DBL_MIN; //cap to prevent zeros in case of very deep coverage or no scaling
-                uf++;
-            }
-
             z[i] = zi;
             ct += zi;
         }
-        if (uf>0) warn=true;
 
         c[t]=((double)scaleto)/ct;
 
@@ -193,10 +309,6 @@ void _forwardHaploid(int k, int n, uint8_t *y, double *nu, double *s, uint8_t *g
         }
     }
     free(z);
-
-    if (warn==true){
-        fprintf(stderr, "WARNING: %d/%d (%.5f) underflow values in forward matrix capped to prevent zeros.\n",uf,(k*n),((double)uf/(double)(k*n)));
-    }
 }
 
 /* ---------- Double-emission variants for diploid adjusted emissions ----------
@@ -207,7 +319,7 @@ void _forwardHaploid(int k, int n, uint8_t *y, double *nu, double *s, uint8_t *g
  * conditions on the other haplotype's posterior via adjusted emissions.
  */
 
-void _forwardHaploidDouble(int k, int n, uint8_t *y, double *nu, double *s, double *g, double *alpha, double *c, unsigned int scaleto, int nthreads) {
+void _forwardHaploidDouble(int k, int n, uint8_t *y, double *nu, double *s, double *g, double *alpha, double *c, unsigned int scaleto, int nthreads, double *alphaMat) {
     int i,t=0;
     double *z=(double *) malloc(k*sizeof(double));
     double colsum;
@@ -236,8 +348,6 @@ void _forwardHaploidDouble(int k, int n, uint8_t *y, double *nu, double *s, doub
     }
 
     colsum=(double)scaleto;
-    bool warn=false;
-    unsigned int uf=0;
 
     for(t=1; t<n; t++){
         ct=0.0;
@@ -250,25 +360,21 @@ void _forwardHaploidDouble(int k, int n, uint8_t *y, double *nu, double *s, doub
         }
 
         #ifdef _OPENMP
-        #pragma omp parallel for num_threads(nthreads) reduction(+:ct,uf)
+        #pragma omp parallel for num_threads(nthreads) reduction(+:ct)
         #endif
         for(i=0; i<k; i++){
             double zi = alpha[(i*n)+(t-1)] * s[t-1];
-            zi += colsum * (1.0-s[t-1]) * (1.0/k);
+
+            double am_i = (alphaMat != NULL) ? alphaMat[i*(n-1)+(t-1)] : (1.0/k);
+            zi += colsum * (1.0-s[t-1]) * am_i;
 
             double e=pow(1.0-g[i*n+t],y[t*2]) * pow(g[i*n+t],y[t*2+1]);
 
             zi *= e;
 
-            if (zi < DBL_MIN){
-                zi = DBL_MIN;
-                uf++;
-            }
-
             z[i] = zi;
             ct += zi;
         }
-        if (uf>0) warn=true;
 
         c[t]=((double)scaleto)/ct;
 
@@ -284,18 +390,12 @@ void _forwardHaploidDouble(int k, int n, uint8_t *y, double *nu, double *s, doub
         }
     }
     free(z);
-
-    if (warn==true){
-        fprintf(stderr, "WARNING: %d/%d (%.5f) underflow values in forward(Double) matrix capped to prevent zeros.\n",uf,(k*n),((double)uf/(double)(k*n)));
-    }
 }
 
-void _backwardHaploidDouble(int k, int n, uint8_t *y, double *s, double *g, double *beta, double *c, int scaleto, int nthreads) {
+void _backwardHaploidDouble(int k, int n, uint8_t *y, double *s, double *g, double *beta, double *c, int scaleto, int nthreads, double *alphaMat) {
     int i;
     double *eb=(double *) malloc(k*sizeof(double));
     int t=n-1;
-    bool warn=false;
-    unsigned int uf=0;
 
     #ifdef _OPENMP
     #pragma omp parallel for num_threads(nthreads)
@@ -317,26 +417,18 @@ void _backwardHaploidDouble(int k, int n, uint8_t *y, double *s, double *g, doub
         }
 
         #ifdef _OPENMP
-        #pragma omp parallel for num_threads(nthreads) reduction(+:uf)
+        #pragma omp parallel for num_threads(nthreads)
         #endif
         for(i=0; i<k; i++){
-            beta[n*i+t] = eb[i]*s[t] + colsum*(1.0-s[t])*(1.0/k);
+            double am_i = (alphaMat != NULL) ? alphaMat[i*(n-1)+t] : (1.0/k);
+            beta[n*i+t] = eb[i]*s[t] + colsum*(1.0-s[t])*am_i;
 
-            if (beta[n*i+t] < DBL_MIN){
-                beta[n*i+t] = DBL_MIN;
-                uf++;
-            }
-
-            if (scaleto>0){
+            if (scaleto!=0){
                 beta[n*i+t]*=c[t];
             }
         }
     }
     free(eb);
-
-    if (warn==true){
-        fprintf(stderr, "WARNING: %d/%d (%.5f) underflow values in backward(Double) matrix capped to prevent zeros.\n",uf,(k*n),( (double) uf/ (double) (k*n)));
-    }
 }
 
 void _backward(int k, int n, uint8_t *y, double *s, double *a, double *g, double *beta, double *c) { //, double *xi_nor) {
@@ -452,25 +544,25 @@ static PyObject* backward_impl(PyObject* self, PyObject* args, PyObject *keywds)
     return NULL;
   }
 
-  int k = PyArray_DIMS(PY_g)[0];
-  int n = PyArray_DIMS(PY_y)[0];
+  int k = NPY_ARRAY_DIMS(PY_g)[0];
+  int n = NPY_ARRAY_DIMS(PY_y)[0];
 
-  assert(PyArray_DIMS(PY_g)[1]==n);
-  assert(PyArray_DIMS(PY_s)[0]==n-1);
-  assert(PyArray_DIMS(PY_a)[0]==k);
-  assert(PyArray_DIMS(PY_a)[1]==n-1);
+  assert(NPY_ARRAY_DIMS(PY_g)[1]==n);
+  assert(NPY_ARRAY_DIMS(PY_s)[0]==n-1);
+  assert(NPY_ARRAY_DIMS(PY_a)[0]==k);
+  assert(NPY_ARRAY_DIMS(PY_a)[1]==n-1);
 
-  uint8_t *y = (uint8_t *)PyArray_DATA(PY_y);
-  double *s = (double *)PyArray_DATA(PY_s);
-  double *g = (double *)PyArray_DATA(PY_g);
-  double *a = (double *)PyArray_DATA(PY_a);
+  uint8_t *y = (uint8_t *)NPY_ARRAY_DATA(PY_y);
+  double *s = (double *)NPY_ARRAY_DATA(PY_s);
+  double *g = (double *)NPY_ARRAY_DATA(PY_g);
+  double *a = (double *)NPY_ARRAY_DATA(PY_a);
 
   betaSize[0] = k*k; betaSize[1] = n;
 
   PY_beta = PyArray_SimpleNew(2, betaSize, NPY_DOUBLE);
-  PyArray_FILLWBYTE(PY_beta,0);
-  double *beta = (double *)PyArray_DATA(PY_beta);
-  double *c = (double*)PyArray_DATA(PY_c);
+  NPY_ARRAY_FILLWBYTE(PY_beta,0);
+  double *beta = (double *)NPY_ARRAY_DATA(PY_beta);
+  double *c = (double*)NPY_ARRAY_DATA(PY_c);
 
   _backward(k,n,y,s,a,g,beta,c);
 
@@ -483,50 +575,60 @@ static PyObject* backward_impl(PyObject* self, PyObject* args, PyObject *keywds)
 static PyObject* backwardHaploid_impl(PyObject* self, PyObject* args, PyObject *keywds)
 {
   PyObject *PY_y, *PY_s, *PY_g, *PY_beta, *PY_c;
+  PyObject *PY_alphaMat = NULL;
   unsigned int scaleto=0; //by default apply no scaling; -1=use Py_c array; >0 scale to fixed number
+  double minp=0.01;
 
   npy_intp betaSize[2];
 
   int nthreads=1;
-  static char *kwlist[] = {"y", "s", "g", "scale", "nthreads", NULL};
+  static char *kwlist[] = {"y", "s", "g", "scale", "nthreads", "alphaMat", "minp", NULL};
 
-  if (!PyArg_ParseTupleAndKeywords(args, keywds, "O!O!O!|Oi", kwlist, &PyArray_Type, &PY_y,
+  if (!PyArg_ParseTupleAndKeywords(args, keywds, "O!O!O!|OiOd", kwlist, &PyArray_Type, &PY_y,
                                             &PyArray_Type, &PY_s,
-                                            &PyArray_Type, &PY_g, &PY_c, &nthreads
+                                            &PyArray_Type, &PY_g, &PY_c, &nthreads,
+                                            &PY_alphaMat, &minp
                                             )){
       return NULL;
   }
 
-  int k = PyArray_DIMS(PY_g)[0];
-  int n = PyArray_DIMS(PY_y)[0];
+  int k = NPY_ARRAY_DIMS(PY_g)[0];
+  int n = NPY_ARRAY_DIMS(PY_y)[0];
 
-  assert(PyArray_DIMS(PY_g)[1]==n);
-  assert(PyArray_DIMS(PY_s)[0]==n-1);
+  assert(NPY_ARRAY_DIMS(PY_g)[1]==n);
+  assert(NPY_ARRAY_DIMS(PY_s)[0]==n-1);
 
-  uint8_t *y = (uint8_t *)PyArray_DATA(PY_y);
-  double *s = (double *)PyArray_DATA(PY_s);
-  uint8_t *g = (uint8_t *)PyArray_DATA(PY_g);
+  uint8_t *y = (uint8_t *)NPY_ARRAY_DATA(PY_y);
+  double *s = (double *)NPY_ARRAY_DATA(PY_s);
+  uint8_t *g = (uint8_t *)NPY_ARRAY_DATA(PY_g);
+
+  double *alphaMat = NULL;
+  if (PY_alphaMat != NULL && PY_alphaMat != Py_None && PyArray_Check(PY_alphaMat)) {
+      assert(NPY_ARRAY_DIMS(PY_alphaMat)[0]==k);
+      assert(NPY_ARRAY_DIMS(PY_alphaMat)[1]==n-1);
+      alphaMat = (double *)NPY_ARRAY_DATA(PY_alphaMat);
+  }
 
   betaSize[0] = k; betaSize[1] = n;
 
   PY_beta = PyArray_SimpleNew(2, betaSize, NPY_DOUBLE);
-  PyArray_FILLWBYTE(PY_beta,0);
-  double *beta = (double *)PyArray_DATA(PY_beta);
+  NPY_ARRAY_FILLWBYTE(PY_beta,0);
+  double *beta = (double *)NPY_ARRAY_DATA(PY_beta);
 
   if (!PyArray_Check(PY_c)){ //if not an array, it has to be an unsigned int to scale columns to
       PyArg_Parse(PY_c,"I",&scaleto);
       //Py_DECREF(PY_c);
       PY_c = PyArray_SimpleNew(1, &betaSize[1], NPY_DOUBLE);
-      PyArray_FILLWBYTE(PY_c,0);
+      NPY_ARRAY_FILLWBYTE(PY_c,0);
   } else { //use c array to scale
       scaleto=-1;
       Py_INCREF(PY_c);
   }
 
-  double *c = (double*)PyArray_DATA(PY_c);
+  double *c = (double*)NPY_ARRAY_DATA(PY_c);
 
   Py_BEGIN_ALLOW_THREADS
-  _backwardHaploid(k,n,y,s,g,beta,c,scaleto,nthreads);
+  _backwardHaploid(k,n,y,s,g,beta,c,scaleto,nthreads,alphaMat,minp);
   Py_END_ALLOW_THREADS
 
   PyObject *ret=Py_BuildValue("(O,O)", PY_beta, PY_c);
@@ -551,34 +653,34 @@ static PyObject* forward_impl(PyObject* self, PyObject* args, PyObject *keywds)
     return NULL;
   }
 
-  int k = PyArray_DIMS(PY_nu)[0];
-  int n = PyArray_DIMS(PY_y)[0];
+  int k = NPY_ARRAY_DIMS(PY_nu)[0];
+  int n = NPY_ARRAY_DIMS(PY_y)[0];
 
   //check that g has k*k rows and n columns
-  // assert(PyArray_DIMS(PY_g)[0]==k*k);
+  // assert(NPY_ARRAY_DIMS(PY_g)[0]==k*k);
 
   //check that input g has k rows and n columns
-  assert(PyArray_DIMS(PY_g)[0]==k);
-  assert(PyArray_DIMS(PY_g)[1]==n);
-  assert(PyArray_DIMS(PY_s)[0]==n-1); //p of no recombination between t and t+1
-  assert(PyArray_DIMS(PY_a)[0]==k);
-  assert(PyArray_DIMS(PY_a)[1]==n-1);
+  assert(NPY_ARRAY_DIMS(PY_g)[0]==k);
+  assert(NPY_ARRAY_DIMS(PY_g)[1]==n);
+  assert(NPY_ARRAY_DIMS(PY_s)[0]==n-1); //p of no recombination between t and t+1
+  assert(NPY_ARRAY_DIMS(PY_a)[0]==k);
+  assert(NPY_ARRAY_DIMS(PY_a)[1]==n-1);
 
-  uint8_t *y = (uint8_t *)PyArray_DATA(PY_y);
-  double *nu = (double *)PyArray_DATA(PY_nu);
-  double *s = (double *)PyArray_DATA(PY_s);
-  double *g = (double *)PyArray_DATA(PY_g);
-  double *a = (double *)PyArray_DATA(PY_a);
+  uint8_t *y = (uint8_t *)NPY_ARRAY_DATA(PY_y);
+  double *nu = (double *)NPY_ARRAY_DATA(PY_nu);
+  double *s = (double *)NPY_ARRAY_DATA(PY_s);
+  double *g = (double *)NPY_ARRAY_DATA(PY_g);
+  double *a = (double *)NPY_ARRAY_DATA(PY_a);
 
   alphaSize[0] = k*k; alphaSize[1] = n;
 
   PY_alpha = PyArray_SimpleNew(2, alphaSize, NPY_DOUBLE);
-  PyArray_FILLWBYTE(PY_alpha,0);
-  double *alpha = (double *)PyArray_DATA(PY_alpha);
+  NPY_ARRAY_FILLWBYTE(PY_alpha,0);
+  double *alpha = (double *)NPY_ARRAY_DATA(PY_alpha);
 
   PY_c = PyArray_SimpleNew(1, &alphaSize[1], NPY_DOUBLE);
-  PyArray_FILLWBYTE(PY_c,0);
-  double *c = (double*)PyArray_DATA(PY_c);
+  NPY_ARRAY_FILLWBYTE(PY_c,0);
+  double *c = (double*)NPY_ARRAY_DATA(PY_c);
 
   _forward(k,n,y,nu,s,a,g,alpha,c);
 
@@ -593,48 +695,55 @@ static PyObject* forward_impl(PyObject* self, PyObject* args, PyObject *keywds)
 static PyObject* forwardHaploid_impl(PyObject* self, PyObject* args, PyObject *keywds)
 {
   PyObject *PY_y, *PY_nu, *PY_s, *PY_g, *PY_alpha, *PY_c;
+  PyObject *PY_alphaMat = NULL;
   npy_intp alphaSize[2];
   unsigned int scaleto=1;
   int nthreads=1;
+  double minp=0.01;
 
-  static char *kwlist[] = {"y", "nu", "s", "g", "scale", "nthreads", NULL};
+  static char *kwlist[] = {"y", "nu", "s", "g", "scale", "nthreads", "alphaMat", "minp", NULL};
 
-  if (!PyArg_ParseTupleAndKeywords(args, keywds, "O!O!O!O!|Ii", kwlist,
+  if (!PyArg_ParseTupleAndKeywords(args, keywds, "O!O!O!O!|IiOd", kwlist,
                                             &PyArray_Type, &PY_y, //Allele allecounts
                                             &PyArray_Type, &PY_nu, //Start probabilties
                                             &PyArray_Type, &PY_s, // transition probability of changing at point p
-                                            &PyArray_Type, &PY_g, &scaleto, &nthreads)){ //emission probabilties
+                                            &PyArray_Type, &PY_g, &scaleto, &nthreads,
+                                            &PY_alphaMat, &minp)){ //emission probabilties
       return NULL;
   }
 
-  int k = PyArray_DIMS(PY_nu)[0];
-  int n = PyArray_DIMS(PY_y)[0];
+  int k = NPY_ARRAY_DIMS(PY_nu)[0];
+  int n = NPY_ARRAY_DIMS(PY_y)[0];
 
   //check that input g has k rows and n columns
-  assert(PyArray_DIMS(PY_g)[0]==k);
-  assert(PyArray_DIMS(PY_g)[1]==n);
-  assert(PyArray_DIMS(PY_s)[0]==n-1); //p of no recombination between t and t+1
-  // assert(PyArray_DIMS(PY_a)[0]==k);
-  // assert(PyArray_DIMS(PY_a)[1]==n-1);
+  assert(NPY_ARRAY_DIMS(PY_g)[0]==k);
+  assert(NPY_ARRAY_DIMS(PY_g)[1]==n);
+  assert(NPY_ARRAY_DIMS(PY_s)[0]==n-1); //p of no recombination between t and t+1
 
-  uint8_t *y = (uint8_t *)PyArray_DATA(PY_y);
-  double *nu = (double *)PyArray_DATA(PY_nu);
-  double *s = (double *)PyArray_DATA(PY_s);
-  uint8_t *g = (uint8_t *)PyArray_DATA(PY_g);
-  // double *a = (double *)PyArray_DATA(PY_a);
+  uint8_t *y = (uint8_t *)NPY_ARRAY_DATA(PY_y);
+  double *nu = (double *)NPY_ARRAY_DATA(PY_nu);
+  double *s = (double *)NPY_ARRAY_DATA(PY_s);
+  uint8_t *g = (uint8_t *)NPY_ARRAY_DATA(PY_g);
+
+  double *alphaMat = NULL;
+  if (PY_alphaMat != NULL && PY_alphaMat != Py_None && PyArray_Check(PY_alphaMat)) {
+      assert(NPY_ARRAY_DIMS(PY_alphaMat)[0]==k);
+      assert(NPY_ARRAY_DIMS(PY_alphaMat)[1]==n-1);
+      alphaMat = (double *)NPY_ARRAY_DATA(PY_alphaMat);
+  }
 
   alphaSize[0] = k; alphaSize[1] = n;
 
   PY_alpha = PyArray_SimpleNew(2, alphaSize, NPY_DOUBLE);
-  PyArray_FILLWBYTE(PY_alpha,0);
-  double *alpha = (double *)PyArray_DATA(PY_alpha);
+  NPY_ARRAY_FILLWBYTE(PY_alpha,0);
+  double *alpha = (double *)NPY_ARRAY_DATA(PY_alpha);
 
   PY_c = PyArray_SimpleNew(1, &alphaSize[1], NPY_DOUBLE);
-  PyArray_FILLWBYTE(PY_c,0);
-  double *c = (double*)PyArray_DATA(PY_c);
+  NPY_ARRAY_FILLWBYTE(PY_c,0);
+  double *c = (double*)NPY_ARRAY_DATA(PY_c);
 
   Py_BEGIN_ALLOW_THREADS
-  _forwardHaploid(k,n,y,nu,s,g,alpha,c,scaleto,nthreads);
+  _forwardHaploid(k,n,y,nu,s,g,alpha,c,scaleto,nthreads,alphaMat,minp);
   Py_END_ALLOW_THREADS
 
   PyObject * ret = Py_BuildValue("(O,O)", PY_alpha, PY_c);
@@ -647,44 +756,53 @@ static PyObject* forwardHaploid_impl(PyObject* self, PyObject* args, PyObject *k
 static PyObject* forwardHaploidDouble_impl(PyObject* self, PyObject* args, PyObject *keywds)
 {
   PyObject *PY_y, *PY_nu, *PY_s, *PY_g, *PY_alpha, *PY_c;
+  PyObject *PY_alphaMat = NULL;
   npy_intp alphaSize[2];
   unsigned int scaleto=1;
   int nthreads=1;
 
-  static char *kwlist[] = {"y", "nu", "s", "g", "scale", "nthreads", NULL};
+  static char *kwlist[] = {"y", "nu", "s", "g", "scale", "nthreads", "alphaMat", NULL};
 
-  if (!PyArg_ParseTupleAndKeywords(args, keywds, "O!O!O!O!|Ii", kwlist,
+  if (!PyArg_ParseTupleAndKeywords(args, keywds, "O!O!O!O!|IiO", kwlist,
                                             &PyArray_Type, &PY_y,
                                             &PyArray_Type, &PY_nu,
                                             &PyArray_Type, &PY_s,
-                                            &PyArray_Type, &PY_g, &scaleto, &nthreads)){
+                                            &PyArray_Type, &PY_g, &scaleto, &nthreads,
+                                            &PY_alphaMat)){
       return NULL;
   }
 
-  int k = PyArray_DIMS(PY_nu)[0];
-  int n = PyArray_DIMS(PY_y)[0];
+  int k = NPY_ARRAY_DIMS(PY_nu)[0];
+  int n = NPY_ARRAY_DIMS(PY_y)[0];
 
-  assert(PyArray_DIMS(PY_g)[0]==k);
-  assert(PyArray_DIMS(PY_g)[1]==n);
-  assert(PyArray_DIMS(PY_s)[0]==n-1);
+  assert(NPY_ARRAY_DIMS(PY_g)[0]==k);
+  assert(NPY_ARRAY_DIMS(PY_g)[1]==n);
+  assert(NPY_ARRAY_DIMS(PY_s)[0]==n-1);
 
-  uint8_t *y = (uint8_t *)PyArray_DATA(PY_y);
-  double *nu = (double *)PyArray_DATA(PY_nu);
-  double *s = (double *)PyArray_DATA(PY_s);
-  double *g = (double *)PyArray_DATA(PY_g);  /* float64 emission */
+  uint8_t *y = (uint8_t *)NPY_ARRAY_DATA(PY_y);
+  double *nu = (double *)NPY_ARRAY_DATA(PY_nu);
+  double *s = (double *)NPY_ARRAY_DATA(PY_s);
+  double *g = (double *)NPY_ARRAY_DATA(PY_g);  /* float64 emission */
+
+  double *alphaMat = NULL;
+  if (PY_alphaMat != NULL && PY_alphaMat != Py_None && PyArray_Check(PY_alphaMat)) {
+      assert(NPY_ARRAY_DIMS(PY_alphaMat)[0]==k);
+      assert(NPY_ARRAY_DIMS(PY_alphaMat)[1]==n-1);
+      alphaMat = (double *)NPY_ARRAY_DATA(PY_alphaMat);
+  }
 
   alphaSize[0] = k; alphaSize[1] = n;
 
   PY_alpha = PyArray_SimpleNew(2, alphaSize, NPY_DOUBLE);
-  PyArray_FILLWBYTE(PY_alpha,0);
-  double *alpha = (double *)PyArray_DATA(PY_alpha);
+  NPY_ARRAY_FILLWBYTE(PY_alpha,0);
+  double *alpha = (double *)NPY_ARRAY_DATA(PY_alpha);
 
   PY_c = PyArray_SimpleNew(1, &alphaSize[1], NPY_DOUBLE);
-  PyArray_FILLWBYTE(PY_c,0);
-  double *c = (double*)PyArray_DATA(PY_c);
+  NPY_ARRAY_FILLWBYTE(PY_c,0);
+  double *c = (double*)NPY_ARRAY_DATA(PY_c);
 
   Py_BEGIN_ALLOW_THREADS
-  _forwardHaploidDouble(k,n,y,nu,s,g,alpha,c,scaleto,nthreads);
+  _forwardHaploidDouble(k,n,y,nu,s,g,alpha,c,scaleto,nthreads,alphaMat);
   Py_END_ALLOW_THREADS
 
   PyObject * ret = Py_BuildValue("(O,O)", PY_alpha, PY_c);
@@ -697,49 +815,58 @@ static PyObject* forwardHaploidDouble_impl(PyObject* self, PyObject* args, PyObj
 static PyObject* backwardHaploidDouble_impl(PyObject* self, PyObject* args, PyObject *keywds)
 {
   PyObject *PY_y, *PY_s, *PY_g, *PY_beta, *PY_c;
+  PyObject *PY_alphaMat = NULL;
   npy_intp betaSize[2];
   int scaleto=1;
   int nthreads=1;
 
-  static char *kwlist[] = {"y", "s", "g", "scale", "nthreads", NULL};
+  static char *kwlist[] = {"y", "s", "g", "scale", "nthreads", "alphaMat", NULL};
 
-  if (!PyArg_ParseTupleAndKeywords(args, keywds, "O!O!O!|Oi", kwlist,
+  if (!PyArg_ParseTupleAndKeywords(args, keywds, "O!O!O!|OiO", kwlist,
                                             &PyArray_Type, &PY_y,
                                             &PyArray_Type, &PY_s,
                                             &PyArray_Type, &PY_g,
-                                            &PY_c, &nthreads)){
+                                            &PY_c, &nthreads,
+                                            &PY_alphaMat)){
       return NULL;
   }
 
-  int k = PyArray_DIMS(PY_g)[0];
-  int n = PyArray_DIMS(PY_y)[0];
+  int k = NPY_ARRAY_DIMS(PY_g)[0];
+  int n = NPY_ARRAY_DIMS(PY_y)[0];
 
-  assert(PyArray_DIMS(PY_g)[1]==n);
-  assert(PyArray_DIMS(PY_s)[0]==n-1);
+  assert(NPY_ARRAY_DIMS(PY_g)[1]==n);
+  assert(NPY_ARRAY_DIMS(PY_s)[0]==n-1);
 
-  uint8_t *y = (uint8_t *)PyArray_DATA(PY_y);
-  double *s = (double *)PyArray_DATA(PY_s);
-  double *g = (double *)PyArray_DATA(PY_g);  /* float64 emission */
+  uint8_t *y = (uint8_t *)NPY_ARRAY_DATA(PY_y);
+  double *s = (double *)NPY_ARRAY_DATA(PY_s);
+  double *g = (double *)NPY_ARRAY_DATA(PY_g);  /* float64 emission */
+
+  double *alphaMat = NULL;
+  if (PY_alphaMat != NULL && PY_alphaMat != Py_None && PyArray_Check(PY_alphaMat)) {
+      assert(NPY_ARRAY_DIMS(PY_alphaMat)[0]==k);
+      assert(NPY_ARRAY_DIMS(PY_alphaMat)[1]==n-1);
+      alphaMat = (double *)NPY_ARRAY_DATA(PY_alphaMat);
+  }
 
   betaSize[0] = k; betaSize[1] = n;
 
   PY_beta = PyArray_SimpleNew(2, betaSize, NPY_DOUBLE);
-  PyArray_FILLWBYTE(PY_beta,0);
-  double *beta = (double *)PyArray_DATA(PY_beta);
+  NPY_ARRAY_FILLWBYTE(PY_beta,0);
+  double *beta = (double *)NPY_ARRAY_DATA(PY_beta);
 
   if (!PyArray_Check(PY_c)){
       PyArg_Parse(PY_c,"I",&scaleto);
       PY_c = PyArray_SimpleNew(1, &betaSize[1], NPY_DOUBLE);
-      PyArray_FILLWBYTE(PY_c,0);
+      NPY_ARRAY_FILLWBYTE(PY_c,0);
   } else {
       scaleto=-1;
       Py_INCREF(PY_c);
   }
 
-  double *c = (double*)PyArray_DATA(PY_c);
+  double *c = (double*)NPY_ARRAY_DATA(PY_c);
 
   Py_BEGIN_ALLOW_THREADS
-  _backwardHaploidDouble(k,n,y,s,g,beta,c,scaleto,nthreads);
+  _backwardHaploidDouble(k,n,y,s,g,beta,c,scaleto,nthreads,alphaMat);
   Py_END_ALLOW_THREADS
 
   PyObject *ret=Py_BuildValue("(O,O)", PY_beta, PY_c);
@@ -769,15 +896,15 @@ static PyObject* fit_impl(PyObject* self, PyObject* args, PyObject *keywds)
         return NULL;
     }
 
-    long *Vdims = PyArray_DIMS(npV);
+    long *Vdims = NPY_ARRAY_DIMS(npV);
 
     npy_intp fwbwSize[2];
     npy_intp cSize[2];
 
-    int k = (int)PyArray_DIMS(npStart)[0];
+    int k = (int)NPY_ARRAY_DIMS(npStart)[0];
     int n = (int)Vdims[1];
 
-    long *alphaDims = PyArray_DIMS(npAlpha);
+    long *alphaDims = NPY_ARRAY_DIMS(npAlpha);
     npy_intp aSize[2];
     aSize[0]=alphaDims[0];
     aSize[1]=alphaDims[1];
@@ -786,29 +913,29 @@ static PyObject* fit_impl(PyObject* self, PyObject* args, PyObject *keywds)
     eSize[0]=k;
     eSize[1]=n;
 
-    assert(PyArray_DIMS(npEmission)[1]==n);
-    assert(PyArray_DIMS(npSigma)[0]==n-1);
-    assert(PyArray_DIMS(npAlpha)[0]==k);
-    assert(PyArray_DIMS(npAlpha)[1]==n-1);
+    assert(NPY_ARRAY_DIMS(npEmission)[1]==n);
+    assert(NPY_ARRAY_DIMS(npSigma)[0]==n-1);
+    assert(NPY_ARRAY_DIMS(npAlpha)[0]==k);
+    assert(NPY_ARRAY_DIMS(npAlpha)[1]==n-1);
 
     cSize[0]=maxit;
     cSize[1]=n;
 
     PyObject *npC = PyArray_SimpleNew(2, cSize, NPY_DOUBLE);
-    PyArray_FILLWBYTE(npC,0);
-    double *C = (double *)PyArray_DATA(npC);
+    NPY_ARRAY_FILLWBYTE(npC,0);
+    double *C = (double *)NPY_ARRAY_DATA(npC);
 
     fwbwSize[0]=k*k;
     fwbwSize[1]=n;
 
-    uint8_t *V = (uint8_t *)PyArray_DATA(npV); //access the data referenced by the np arrays
-    double *nu = (double *)PyArray_DATA(npStart);
-    double *a = (double *)PyArray_DATA(npAlpha);
-    double *s = (double *)PyArray_DATA(npSigma);
-    double *g = (double *)PyArray_DATA(npEmission);
+    uint8_t *V = (uint8_t *)NPY_ARRAY_DATA(npV); //access the data referenced by the np arrays
+    double *nu = (double *)NPY_ARRAY_DATA(npStart);
+    double *a = (double *)NPY_ARRAY_DATA(npAlpha);
+    double *s = (double *)NPY_ARRAY_DATA(npSigma);
+    double *g = (double *)NPY_ARRAY_DATA(npEmission);
 
     uint32_t *pos;
-    if (npPos!=NULL) pos = (uint32_t *)PyArray_DATA(npPos);
+    if (npPos!=NULL) pos = (uint32_t *)NPY_ARRAY_DATA(npPos);
 
     double ll=0, pl=0;
     time_t t0;
@@ -823,13 +950,13 @@ static PyObject* fit_impl(PyObject* self, PyObject* args, PyObject *keywds)
         t0 = time(NULL);
         fprintf(stderr, "Iteration: %d\n", it);
 
-        PyArray_FILLWBYTE(npasum,0);
-        PyArray_FILLWBYTE(npgammaSum0,0);
-        PyArray_FILLWBYTE(npgammaSum1,0);
+        NPY_ARRAY_FILLWBYTE(npasum,0);
+        NPY_ARRAY_FILLWBYTE(npgammaSum0,0);
+        NPY_ARRAY_FILLWBYTE(npgammaSum1,0);
 
-        double *asum = (double *)PyArray_DATA(npasum);
-        double *gammaSum0 = (double *)PyArray_DATA(npgammaSum0); //emission update
-        double *gammaSum1 = (double *)PyArray_DATA(npgammaSum1); //emission update
+        double *asum = (double *)NPY_ARRAY_DATA(npasum);
+        double *gammaSum0 = (double *)NPY_ARRAY_DATA(npgammaSum0); //emission update
+        double *gammaSum1 = (double *)NPY_ARRAY_DATA(npgammaSum1); //emission update
 
         double priorsum[k*k];
         for(i=0; i<(k*k); i++) priorsum[i]=0.0;
@@ -899,7 +1026,9 @@ static PyObject* fit_impl(PyObject* self, PyObject* args, PyObject *keywds)
                     }
                 }
 
-                emission(g,y,k,n,t+1,e);
+                if (t < n-1) {
+                    emission(g,y,k,n,t+1,e);
+                }
 
                 for(i=0; i<k; i++){ //for each maternal state (from)
                     for(j=0; j<k; j++){ //for each paternal state (from)
@@ -934,7 +1063,7 @@ static PyObject* fit_impl(PyObject* self, PyObject* args, PyObject *keywds)
 
         assert(ll<=0.0);
 
-        double minp=1e-4; //min probability, to prevent zero emission probabilities
+        double minp=1e-3; //min probability, to prevent zero emission probabilities
 
         //Now update start probabilities
         double z[k],gammatot=0.0;

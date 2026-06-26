@@ -13,8 +13,6 @@ from multiprocessing import Pool
 def worker_fszd(pl):
     samfile,args=pl
     cram = pysam.AlignmentFile(samfile, reference_filename=args.reference)
-    if args.reference==None:
-        raise ValueError("Reference file is required.")
     fszd = {}
     for fsz in range(args.lower, args.upper):
         fszd[fsz] = 0
