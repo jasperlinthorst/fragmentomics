@@ -188,22 +188,23 @@ void _backwardHaploid(int k, int n, uint8_t *y, double *s, uint8_t *g, double *b
         }
 
         #ifdef _OPENMP
-        #pragma omp parallel for num_threads(nthreads) reduction(max:cmax)
+        #pragma omp parallel for num_threads(nthreads)
         #endif
         for(i=0; i<k; i++){
             double am_i = (alphaMat != NULL) ? alphaMat[i*(n-1)+t] : (1.0/k);
             double b = (eb[i] * s[t]) + (colsum * (1.0-s[t]) * am_i);
 
             beta[(i*n)+(t)] = b;
-
-            if (scaleto>0){
-                if (b>cmax) cmax=b;
-            }
         }
 
         //determine scaling factor
         if (scaleto!=0){
             if (scaleto>0){
+                /* find cmax serially -- avoids reduction(max:) which needs OpenMP 3.1 */
+                cmax=0.0;
+                for(i=0; i<k; i++){
+                    if (beta[(i*n)+(t)] > cmax) cmax = beta[(i*n)+(t)];
+                }
                 c[t]=((double)scaleto)/cmax;
             }
 
