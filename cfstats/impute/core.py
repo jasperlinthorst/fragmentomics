@@ -1903,7 +1903,13 @@ class _BGZFWriter:
     """Minimal text wrapper around pysam.BGZFile."""
 
     def __init__(self, path):
-        self._fh = pysam.BGZFile(path, "wb")
+        import os
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        try:
+            self._fh = pysam.BGZFile(path, "wb")
+        except Exception as e:
+            logging.error("Failed to open output file '%s': %s" % (path, e))
+            sys.exit(1)
 
     def write(self, text):
         self._fh.write(text.encode("utf-8"))
