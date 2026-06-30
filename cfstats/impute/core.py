@@ -932,6 +932,53 @@ def diploid_emission(emission_is_alt, h_alleles, minp=0.01):
     )
 
 
+def triploid_emission(emission_is_alt, a_other1, a_other2,
+                      w_target, w_other1, w_other2, minp=0.01):
+    """Float64 adjusted emission for the mean-field triploid (NIPT) model.
+
+    Three-haplotype analogue of :func:`diploid_emission`.  When updating one
+    haplotype (the *target*) while conditioning on the sampled allele paths
+    ``a_other1`` / ``a_other2`` of the other two haplotypes, the expected
+    alternate-allele probability of a *pooled* read at site *t* under reference
+    state *i* is the fetal-fraction-weighted mixture::
+
+        p(i, t) = w_target * e[i, t]
+                  + w_other1 * a_other1[t]
+                  + w_other2 * a_other2[t]
+
+    where ``e[i, t]`` is the candidate {0,1} allele of reference haplotype *i*
+    and the contribution weights sum to one across the three haplotypes
+    (``0.5`` for IMH, ``0.5*(1-ff)`` for NIMH and ``0.5*ff`` for IPH; with
+    ``--read-prior`` the NIMH/IPH weights may be per-site arrays of shape
+    ``(n,)``).  The result is clamped to ``[minp, 1-minp]`` to avoid underflow.
+
+    Parameters
+    ----------
+    emission_is_alt : ndarray (k, n) bool
+        ``emission > 0.5`` for the (sub-selected) reference panel.
+    a_other1, a_other2 : ndarray (n,)
+        Sampled alleles (0/1) of the two conditioned haplotypes.
+    w_target, w_other1, w_other2 : float or ndarray (n,)
+        Contribution weights of the target and the two conditioned haplotypes.
+    minp : float
+        Emission floor.
+
+    Returns
+    -------
+    ndarray (k, n) float64
+        Adjusted emission probabilities for the conditioned HMM pass.
+    """
+    e = emission_is_alt.astype(np.float64)             # (k, n)
+    a1 = np.asarray(a_other1, dtype=np.float64)        # (n,)
+    a2 = np.asarray(a_other2, dtype=np.float64)        # (n,)
+    w1 = np.asarray(w_other1, dtype=np.float64)        # scalar or (n,)
+    w2 = np.asarray(w_other2, dtype=np.float64)        # scalar or (n,)
+    wt = np.asarray(w_target, dtype=np.float64)        # scalar or (n,)
+    base = (w1 * a1 + w2 * a2)[np.newaxis, :]          # (1, n)
+    p = wt * e + base                                  # broadcast to (k, n)
+    return np.clip(p, minp, 1.0 - minp)
+
+
 def sample_haplotype_path(gamma, emission):
     """Sample a haplotype path from the posterior *gamma*.
 
@@ -1248,6 +1295,258 @@ def impute_diploid(R, sigma, emission, nhap=None, n_iter=3,
         print("Phasing: recast_haps corrected %d/%d sites" % (n_recast, n))
 
     return p1, p2, emission, phased_haps
+
+
+# ===================================================================
+# Triploid (NIPT) mean-field imputation with EM fetal-fraction estimate
+# ===================================================================
+
+def _hap_marginal_palt(gamma, emission):
+    """Per-site marginal P(alt) for a haplotype posterior ``gamma`` (n,)."""
+    return (gamma * emission).sum(axis=0) / np.maximum(gamma.sum(axis=0), 1e-300)
+
+
+def _read_loglik_under_hap(R, r, p_hap):
+    """Log-likelihood of read *r*'s observations under a haplotype P(alt) vector."""
+    ll = 0.0
+    for idx, allele, qual in R[r][0]:
+        bq = qual if qual and qual > 0 else 30
+        p_err = 10.0 ** (-bq / 10.0)
+        palt = p_hap[idx] * (1.0 - p_err) + (1.0 - p_hap[idx]) * p_err
+        ll += np.log((palt if allele == 1 else 1.0 - palt) + 1e-300)
+    return ll
+
+
+def read_label_responsibilities(R, p_im, p_nim, p_ip, ff=0.1, read_prior=False):
+    """Soft IMH/NIMH/IPH responsibilities for each read (triploid EM E-step).
+
+    Each read is a three-component mixture over the haplotype labels
+    0=IMH, 1=NIMH, 2=IPH with the (per-read) log-prior
+    ``[log 0.5, log 0.5(1-pi), log 0.5 pi]`` from :func:`read_label_logprior`,
+    where ``pi`` is the global fetal fraction *ff* or the per-read posterior
+    ``w_i`` (see :func:`read_w`) when *read_prior* is set.  Each component
+    likelihood is the read's likelihood under the corresponding haplotype
+    P(alt) vector.
+
+    Returns
+    -------
+    resp : ndarray (nReads, 3) float64
+        Posterior label responsibilities, each row summing to one.
+    """
+    resp = np.empty((len(R), 3), dtype=np.float64)
+    for j, r in enumerate(R):
+        prior = read_label_logprior(read_w(R, r) if read_prior else None, ff)
+        logp = np.array([
+            prior[0] + _read_loglik_under_hap(R, r, p_im),
+            prior[1] + _read_loglik_under_hap(R, r, p_nim),
+            prior[2] + _read_loglik_under_hap(R, r, p_ip),
+        ])
+        logp -= logp.max()
+        w = np.exp(logp)
+        resp[j] = w / w.sum()
+    return resp
+
+
+def read_fetal_responsibilities(R, p_im, p_nim, p_ip, ff=0.1, read_prior=False):
+    """Per-read fetal-only (IPH) responsibility (convenience wrapper).
+
+    Returns the IPH column of :func:`read_label_responsibilities`, i.e. the
+    posterior probability that each read originates from the fetal-only
+    (inherited paternal) haplotype.
+    """
+    return read_label_responsibilities(
+        R, p_im, p_nim, p_ip, ff=ff, read_prior=read_prior)[:, 2]
+
+
+def estimate_ff_from_responsibilities(resp):
+    """EM M-step fetal fraction from 3-label responsibilities.
+
+    Uses the read-label maximum-likelihood form ``IPH / (NIMH + IPH)`` (the
+    shared IMH reads are uninformative for ff and are excluded), with the hard
+    read counts replaced by their soft responsibilities.
+    """
+    nim = resp[:, 1].sum()
+    ip = resp[:, 2].sum()
+    denom = nim + ip
+    return float(ip / denom) if denom > 0 else 0.0
+
+
+def assign_read_labels_triploid(R, p_im, p_nim, p_ip, ff=0.1, read_prior=False):
+    """Hard-assign each read to an IMH/NIMH/IPH label (in-place on ``R``).
+
+    Used after mean-field convergence to populate the per-allele read-count
+    fields (RAC/AAC) expected by :func:`outputvcf`.  The label is the argmax of
+    the per-read log-prior (see :func:`read_label_logprior`) plus the read's
+    log-likelihood under the corresponding haplotype P(alt) vector.
+    """
+    ps = (p_im, p_nim, p_ip)
+    for r in R:
+        prior = read_label_logprior(read_w(R, r) if read_prior else None, ff)
+        best_lbl, best_ll = 0, -np.inf
+        for lbl in range(3):
+            ll = prior[lbl] + _read_loglik_under_hap(R, r, ps[lbl])
+            if ll > best_ll:
+                best_ll, best_lbl = ll, lbl
+        R[r][1] = best_lbl
+
+
+def _per_site_ff(R, n, ff):
+    """Per-site fetal-fraction vector from per-read posteriors ``w_i``.
+
+    Reads covering each site contribute their ``w_i`` (or the global *ff* when
+    no per-read posterior is available); the site value is the coverage-weighted
+    mean.  Sites with no coverage default to the global *ff*.
+    """
+    wsum = np.zeros(n, dtype=np.float64)
+    wcnt = np.zeros(n, dtype=np.float64)
+    for r in R:
+        wi = read_w(R, r)
+        if wi is None:
+            wi = ff
+        for idx, _, _ in R[r][0]:
+            wsum[idx] += wi
+            wcnt[idx] += 1.0
+    ff_site = np.full(n, ff, dtype=np.float64)
+    mask = wcnt > 0
+    ff_site[mask] = wsum[mask] / wcnt[mask]
+    return ff_site
+
+
+def impute_triploid(R, sigma, emission, ff=0.1, nhap=None, n_iter=3,
+                    minp=0.01, nthreads=1, read_prior=False,
+                    em_tol=1e-3, ff_min=1e-3, ff_max=0.5, dump_prefix=None):
+    """Triploid (NIPT) imputation via mean-field variational inference + EM.
+
+    Replaces the slow O(k^3) / block-Gibbs :func:`gibbs` model with the
+    mean-field scheme sketched in the module docstring (three haplotypes,
+    ff-weighted emissions, O(k^2) per haplotype pass).
+
+    The three haplotypes are IMH (inherited maternal, shared), NIMH
+    (non-inherited maternal) and IPH (inherited paternal, fetal-only).  All
+    reads are pooled into a single ``(n, 2)`` observation matrix; each outer
+    iteration sweeps the three haplotypes, sampling allele paths for the two
+    conditioned haplotypes and running a float64 forward-backward for the
+    target with :func:`triploid_emission`.  After each sweep an EM step
+    re-estimates the fetal fraction from per-read fetal responsibilities
+    (:func:`read_fetal_responsibilities`), seeded by the user-supplied *ff*.
+
+    When *read_prior* is set, the per-read posterior ``w_i`` modulates both the
+    EM responsibilities (per-read prior) and the NIMH/IPH emission weights
+    (via a coverage-weighted per-site fetal fraction, :func:`_per_site_ff`).
+
+    Returns
+    -------
+    gammaIMH, gammaNIMH, gammaIPH : ndarray (k_sel, n)
+        Per-haplotype posteriors (averaged over post-burn-in iterations).
+    emission : ndarray (k_sel, n)
+        The (possibly sub-selected) emission matrix used.
+    ff_hat : float
+        EM-estimated fetal fraction.
+    """
+    # --- haplotype pre-selection ---
+    if nhap is not None and isinstance(nhap, int):
+        hap_indices = preselect_haplotypes(R, emission, nhap, emission.shape[1])
+        print("Using %d pre-selected haplotypes for triploid pass." %
+              len(hap_indices))
+        emission = emission[hap_indices, :]
+
+    k = emission.shape[0]
+    n = emission.shape[1]
+    is_alt = (emission > 0.5)
+
+    x_all = RtoX(R, n, label=None)
+    print("Pooled observation matrix: %d sites with data" %
+          (x_all.sum(axis=1) > 0).sum())
+
+    # --- initial haploid pass (shared posterior; symmetry broken by sampling) ---
+    gamma0 = forward_backward_haploid(x_all, sigma, emission, nthreads=nthreads)
+    gammaIMH = gamma0.copy()
+    gammaNIMH = gamma0.copy()
+    gammaIPH = gamma0.copy()
+    print("Triploid: initial haploid pass done")
+
+    ff_cur = float(np.clip(ff, ff_min, ff_max))
+
+    burnin = max(0, n_iter // 3)
+    imh_sum = np.zeros_like(gamma0)
+    nim_sum = np.zeros_like(gamma0)
+    ip_sum = np.zeros_like(gamma0)
+    n_avg = 0
+
+    for gi in range(n_iter):
+        # --- contribution weights (scalar, or per-site under read-prior) ---
+        if read_prior:
+            ff_site = _per_site_ff(R, n, ff_cur)
+            w_im = 0.5
+            w_nim = 0.5 * (1.0 - ff_site)
+            w_ip = 0.5 * ff_site
+        else:
+            w_im = 0.5
+            w_nim = 0.5 * (1.0 - ff_cur)
+            w_ip = 0.5 * ff_cur
+
+        # --- mean-field sweep over the three haplotypes ---
+        a_nim = sample_haplotype_path(gammaNIMH, emission)
+        a_ip = sample_haplotype_path(gammaIPH, emission)
+        eff = triploid_emission(is_alt, a_nim, a_ip, w_im, w_nim, w_ip, minp)
+        gammaIMH = forward_backward_haploid_double(
+            x_all, sigma, eff, nthreads=nthreads)
+
+        a_im = sample_haplotype_path(gammaIMH, emission)
+        eff = triploid_emission(is_alt, a_im, a_ip, w_nim, w_im, w_ip, minp)
+        gammaNIMH = forward_backward_haploid_double(
+            x_all, sigma, eff, nthreads=nthreads)
+
+        a_nim = sample_haplotype_path(gammaNIMH, emission)
+        eff = triploid_emission(is_alt, a_im, a_nim, w_ip, w_im, w_nim, minp)
+        gammaIPH = forward_backward_haploid_double(
+            x_all, sigma, eff, nthreads=nthreads)
+
+        # --- EM fetal-fraction update ---
+        p_im = _hap_marginal_palt(gammaIMH, emission)
+        p_nim = _hap_marginal_palt(gammaNIMH, emission)
+        p_ip = _hap_marginal_palt(gammaIPH, emission)
+        resp = read_label_responsibilities(
+            R, p_im, p_nim, p_ip, ff=ff_cur, read_prior=read_prior)
+        ff_new = float(np.clip(
+            estimate_ff_from_responsibilities(resp) if len(resp) else ff_cur,
+            ff_min, ff_max))
+
+        if dump_prefix is not None:
+            np.savez_compressed(
+                '%s_triploid_iter%d.npz' % (dump_prefix, gi + 1),
+                gammaIMH=gammaIMH.astype(np.float32),
+                gammaNIMH=gammaNIMH.astype(np.float32),
+                gammaIPH=gammaIPH.astype(np.float32),
+                emission=emission.astype(np.uint8),
+                sigma=sigma.astype(np.float64),
+                ff=np.float64(ff_new),
+            )
+
+        if gi >= burnin:
+            imh_sum += gammaIMH
+            nim_sum += gammaNIMH
+            ip_sum += gammaIPH
+            n_avg += 1
+
+        print("Triploid iter %d: ff=%.4f -> %.4f%s" %
+              (gi + 1, ff_cur, ff_new,
+               " (averaging)" if gi >= burnin else " (burn-in)"))
+
+        converged = abs(ff_new - ff_cur) < em_tol
+        ff_cur = ff_new
+        if converged and gi >= burnin:
+            print("Triploid: EM fetal fraction converged.")
+            break
+
+    if n_avg > 0:
+        gammaIMH = imh_sum / n_avg
+        gammaNIMH = nim_sum / n_avg
+        gammaIPH = ip_sum / n_avg
+    print("Triploid: averaged %d post-burn-in samples; ff_hat=%.4f" %
+          (n_avg, ff_cur))
+
+    return gammaIMH, gammaNIMH, gammaIPH, emission, ff_cur
 
 
 def _build_gl_per_hap(R, n, labels, read_keys, default_bq=30):
@@ -2015,11 +2314,17 @@ def outputvcf_diploid_marginals(p1, p2, R, emission,
 
 
 def outputvcf(gammaIMH, gammaNIMH, gammaIPH, R, emission,
-              chrom, variants, vcffile, sample, minp=0.01):
+              chrom, variants, vcffile, sample, minp=0.01, ff=None):
     """Write triploid (NIPT) imputation results to VCF.
 
     Produces two sample columns: maternal genotype and fetal genotype,
     each with phased GT, diploid GP, and dosage.
+
+    Parameters
+    ----------
+    ff : float or None
+        When provided (e.g. the EM estimate from :func:`impute_triploid`), this
+        value is written to the ``##ff=`` header instead of the read-label MLE.
     """
     k = gammaIMH.shape[0]
     n = gammaIMH.shape[1]
@@ -2038,8 +2343,12 @@ def outputvcf(gammaIMH, gammaNIMH, gammaIPH, R, emission,
     print("Reads assigned to non-inherited maternal allele:", NIMHreadcnt)
     print("Reads assigned to inherited paternal allele:", IPHreadcnt)
 
-    ff = (IPHreadcnt / float(NIMHreadcnt + IPHreadcnt)) if (NIMHreadcnt + IPHreadcnt) else 0.0
-    print("MLE fetal fraction: %.4f" % ff)
+    ff_mle = (IPHreadcnt / float(NIMHreadcnt + IPHreadcnt)) if (NIMHreadcnt + IPHreadcnt) else 0.0
+    print("MLE fetal fraction (read-label): %.4f" % ff_mle)
+    if ff is None:
+        ff = ff_mle
+    else:
+        print("Using supplied fetal fraction for header: %.4f" % ff)
 
     Ximh = RtoX(R, n, order[2])
     Xnimh = RtoX(R, n, order[1])

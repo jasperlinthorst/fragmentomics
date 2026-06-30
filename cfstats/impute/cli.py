@@ -91,8 +91,9 @@ def impute_ref(args):
         if args.maxnreads is None:
             logging.error("For simulating specify --maxnreads.")
             sys.exit(1)
+        sim_ff = args.ff if args.ff is not None else 0.1
         R = imputefflib.simR(imh, nimh, iph, emission.shape[1],
-                             totreads=args.maxnreads, ff=args.ff)
+                             totreads=args.maxnreads, ff=sim_ff)
         simulation = True
     else:
         logging.error("Unknown input file, expecting sam/bam/cram: %s" % args.input)
@@ -100,9 +101,12 @@ def impute_ref(args):
 
     # --- imputation mode -----------------------------------------------
     nhap = getattr(args, 'nhap', None)
-    diploid = getattr(args, 'diploid', False)
+    read_prior = getattr(args, 'read_prior', False)
+    # Diploid mean-field is the default; supplying --ff (or --read-prior)
+    # selects the mean-field triploid (NIPT) model.
+    triploid = (getattr(args, 'ff', None) is not None) or read_prior
 
-    if diploid:
+    if not triploid:
         n_iter = getattr(args, 'gibbs_fulliter', 3)
         if n_iter is None:
             n_iter = 3
@@ -143,67 +147,35 @@ def impute_ref(args):
             print("Error rate imputing (diploid):",
                   np.abs(gt - imh).sum() / len(gt))
     else:
-        # --- triploid (NIPT) mode: Gibbs read labelling ---
-        read_prior = getattr(args, 'read_prior', False)
-        imputefflib.gibbs(R, sigma, emission,
-                          ff=args.ff, nhap=nhap, useprior=True, verbose=False,
-                          maxiterfull=args.gibbs_fulliter,
-                          maxiterpart=args.gibbs_partiter,
-                          nthreads=nthreads, read_prior=read_prior)
+        # --- triploid (NIPT) mode: mean-field variational inference + EM ---
+        # NOTE: the legacy block-Gibbs read-labelling model (core.gibbs) is
+        # retained in core.py for reference but is no longer invoked.
+        ff_seed = args.ff if args.ff is not None else 0.1
+        n_iter = getattr(args, 'gibbs_fulliter', 3) or 3
+        dump_prefix = getattr(args, 'dump', None)
 
-        imputefflib.gibbs(R, sigma, emission,
-                          ff=args.ff, nhap=nhap, useprior=False, verbose=False,
-                          maxiterfull=args.gibbs_fulliter,
-                          maxiterpart=args.gibbs_partiter,
-                          nthreads=nthreads, read_prior=read_prior)
+        (gammaIMH, gammaNIMH, gammaIPH,
+         emission, ff_hat) = imputefflib.impute_triploid(
+            R, sigma, emission,
+            ff=ff_seed, nhap=nhap, n_iter=n_iter,
+            minp=args.minp, nthreads=nthreads, read_prior=read_prior,
+            dump_prefix=dump_prefix)
+        print("EM-estimated fetal fraction: %.4f" % ff_hat)
 
-        # Subset emission for final pass if nhap was used
-        if nhap is not None and isinstance(nhap, int):
-            hap_indices = imputefflib.preselect_haplotypes(
-                R, emission, nhap, emission.shape[1])
-            emission = emission[hap_indices, :]
-            print("Using %d pre-selected haplotypes for final pass." % len(hap_indices))
-
-        k = emission.shape[0]
         n = emission.shape[1]
 
-        # Determine read-label counts and ordering
-        readcnt = np.zeros(3)
-        for r in R:
-            readcnt[R[r][1]] += 1
-        order = np.argsort(readcnt)
-
-        IPHreadcnt, NIMHreadcnt, IMHreadcnt = readcnt[order]
-        print("Reads assigned to IMH:", IMHreadcnt,
-              "NIMH:", NIMHreadcnt, "IPH:", IPHreadcnt)
-        if (NIMHreadcnt + IPHreadcnt) > 0:
-            print("MLE fetal fraction: %.4f" %
-                  (IPHreadcnt / float(NIMHreadcnt + IPHreadcnt)))
-
-        x1 = imputefflib.RtoX(R, n, order[2])  # IMH
-        x2 = imputefflib.RtoX(R, n, order[1])  # NIMH
-        x3 = imputefflib.RtoX(R, n, order[0])  # IPH
-
-        # Final forward-backward per label (GIL-free, can run in parallel)
-        if nthreads > 1:
-            with ThreadPoolExecutor(max_workers=3) as pool:
-                gammaIMH, gammaNIMH, gammaIPH = list(pool.map(
-                    lambda x: imputefflib.forward_backward_haploid(
-                        x, sigma, emission, nthreads=nthreads),
-                    (x1, x2, x3)))
-        else:
-            gammaIMH = imputefflib.forward_backward_haploid(
-                x1, sigma, emission, nthreads=nthreads)
-            gammaNIMH = imputefflib.forward_backward_haploid(
-                x2, sigma, emission, nthreads=nthreads)
-            gammaIPH = imputefflib.forward_backward_haploid(
-                x3, sigma, emission, nthreads=nthreads)
+        # Hard read-label assignment (only for the RAC/AAC output fields).
+        p_im = (gammaIMH * emission).sum(axis=0) / np.maximum(gammaIMH.sum(axis=0), 1e-300)
+        p_nim = (gammaNIMH * emission).sum(axis=0) / np.maximum(gammaNIMH.sum(axis=0), 1e-300)
+        p_ip = (gammaIPH * emission).sum(axis=0) / np.maximum(gammaIPH.sum(axis=0), 1e-300)
+        imputefflib.assign_read_labels_triploid(
+            R, p_im, p_nim, p_ip, ff=ff_hat, read_prior=read_prior)
 
         if not simulation:
             sample = args.sample or os.path.basename(args.input).split('.')[0]
             imputefflib.outputvcf(
                 gammaIMH, gammaNIMH, gammaIPH, R, emission,
-                args.chrom, variants, args.output, sample)
+                args.chrom, variants, args.output, sample, ff=ff_hat)
         else:
             ed = np.abs(emission - args.minp)
             palt_fn = lambda g: (g * ed).sum(axis=0) / ((g * ed).sum(axis=0) + (g * (1 - ed)).sum(axis=0))
