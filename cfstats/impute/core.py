@@ -2486,7 +2486,8 @@ def outputvcf(gammaIMH, gammaNIMH, gammaIPH, R, emission,
     iszd = [[], [], []]
     for r in R:
         readcnt[R[r][1]] += 1
-        iszd[R[r][1]].append(abs(R[r][3]))
+        if abs(R[r][3])!=None:
+            iszd[R[r][1]].append(abs(R[r][3]))
 
     order = np.argsort(readcnt)
     IPHreadcnt, NIMHreadcnt, IMHreadcnt = readcnt[order]
@@ -2518,6 +2519,8 @@ def outputvcf(gammaIMH, gammaNIMH, gammaIPH, R, emission,
     lbl_names = ["IMH", "NIMH", "IPH"]
     isz_conf = [[] for _ in range(3)]
     for r in R:
+        if R[r][3]==None: #no proper template_length
+            continue
         tlen = abs(R[r][3])
         if tlen == 0:
             continue
