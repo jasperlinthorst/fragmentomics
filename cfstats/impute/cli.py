@@ -137,10 +137,12 @@ def impute_ref(args):
 
         if not simulation:
             sample = args.sample or os.path.basename(args.input).split('.')[0]
+            ff_dipl = imputefflib.estimate_ff_diploid(R, p1, p2)
             imputefflib.outputvcf_diploid_marginals(
                 p1, p2, R, emission,
                 args.chrom, variants, args.output, sample,
-                phased_haps=phased_haps)
+                phased_haps=phased_haps,
+                ff_diploid=ff_dipl.get("ff_lr"))
         else:
             dosage = p1 + p2
             gt = np.round(dosage).astype(np.int8)

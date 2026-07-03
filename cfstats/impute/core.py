@@ -454,7 +454,6 @@ def loadref_vcf(vcf, contig=None, start=None, stop=None,
     if _is_trained_model_vcf(vcf):
         logging.info("Detected trained model VCF format")
         return _loadref_vcf_trained(vcf, contig, start, stop)
-
     try:
         return _loadref_vcf_bcftools(vcf, contig, start, stop, nGen, avgr, minp,
                                      genetic_map=genetic_map)
@@ -624,6 +623,12 @@ def _loadref_vcf_bcftools(vcf, contig, start, stop, nGen, avgr, minp,
     variants = []
     for line in info_raw.split('\n'):
         vid, pos_s, ref, alt = line.split('\t')
+        if ',' in alt:
+            first_alt = alt.split(',')[0]
+            logging.warning(
+                "Multi-allelic site %s POS=%s (ALTs: %s): only REF vs first ALT (%s) used",
+                vid, pos_s, alt, first_alt)
+            alt = first_alt
         variants.append((vid, int(pos_s), ref, alt))
 
     n_variants = len(variants)
@@ -637,6 +642,8 @@ def _loadref_vcf_bcftools(vcf, contig, start, stop, nGen, avgr, minp,
 
     raw_arr = np.frombuffer(gt_raw, dtype=np.uint8)
     digits = raw_arr[(raw_arr >= 48) & (raw_arr <= 57)] - 48
+    # Clamp to [0, 1]: allele index >=2 (second+ alt) is treated as alt-1
+    digits = np.clip(digits, 0, 1)
     n_haplotypes = len(digits) // n_variants
 
     emission = digits.reshape(n_variants, n_haplotypes).T.copy()
@@ -654,8 +661,13 @@ def _loadref_vcf_pysam(vcf, contig, start, stop, nGen, avgr, minp,
     variants = []
 
     for rec in vcffile.fetch(contig=contig, start=start, stop=stop):
-        variants.append((rec.id, rec.pos, rec.ref, rec.alts[0]))
-        col = [np.uint8(g) for gt in rec.samples.values() for g in gt['GT']]
+        if rec.alts and len(rec.alts) > 1:
+            logging.warning(
+                "Multi-allelic site %s POS=%d (ALTs: %s): only REF vs first ALT (%s) used",
+                rec.id or '.', rec.pos, ','.join(rec.alts), rec.alts[0])
+        alt = rec.alts[0] if rec.alts else '.'
+        variants.append((rec.id, rec.pos, rec.ref, alt))
+        col = [np.uint8(min(g, 1)) for gt in rec.samples.values() for g in gt['GT']]
         emission.append(col)
 
     positions = [v[1] for v in variants]
@@ -731,21 +743,53 @@ def getR(file, chrom, variants, ref=None,
 
     reads_considered=set()
     for vid, pos, refa, alt in variants:
+        is_indel = len(refa) != 1 or len(alt) != 1
+        ins_len = len(alt) - len(refa) if is_indel and len(alt) > len(refa) else 0
+        del_len = len(refa) - len(alt) if is_indel and len(refa) > len(alt) else 0
         for pc in bamfile.pileup(chrom, int(pos) - 1, int(pos),
                                  truncate=True, multiple_iterators=False, 
                                  stepper=stepper, min_base_quality=min_base_quality, min_mapping_quality=min_base_quality):
             for pcr in pc.pileups:
-                if pcr.query_position is None or pcr.alignment.is_secondary or pcr.alignment.is_unmapped or pcr.alignment.is_duplicate:
+                if pcr.alignment.is_secondary or pcr.alignment.is_unmapped or pcr.alignment.is_duplicate:
                     continue
-                pb = pcr.alignment.query_sequence[pcr.query_position]
-                pq = pcr.alignment.query_qualities[pcr.query_position]
-                                    
-                if pb == refa:
-                    a = 0
-                elif pb == alt:
-                    a = 1
+                if is_indel:
+                    if ins_len > 0:
+                        # Insertion: pcr.indel > 0 means inserted bases follow this position
+                        if pcr.query_position is None:
+                            continue
+                        pq = pcr.alignment.query_qualities[pcr.query_position]
+                        if pcr.indel == ins_len:
+                            a = 1
+                        elif pcr.indel == 0:
+                            a = 0
+                        else:
+                            continue
+                    else:
+                        # Deletion: pcr.indel < 0 or query_position is None
+                        if pcr.query_position is None:
+                            # Read has a deletion here
+                            pq = 30  # no base quality for deletions; use placeholder
+                            if abs(pcr.indel) == del_len:
+                                a = 1
+                            else:
+                                continue
+                        else:
+                            pq = pcr.alignment.query_qualities[pcr.query_position]
+                            if pcr.indel == 0:
+                                a = 0
+                            else:
+                                continue
                 else:
-                    continue
+                    if pcr.query_position is None:
+                        continue
+                    pb = pcr.alignment.query_sequence[pcr.query_position]
+                    pq = pcr.alignment.query_qualities[pcr.query_position]
+                    if pb == refa:
+                        a = 0
+                    elif pb == alt:
+                        a = 1
+                    else:
+                        continue
 
                 k = (pcr.alignment.reference_start,
                      pcr.alignment.query_name)
@@ -762,9 +806,13 @@ def getR(file, chrom, variants, ref=None,
                         [(i, a, pq)],
                         0 if s < 0.5 else 1 if s < 1 - (ff / 2) else 2,
                         None,
-                        pcr.alignment.template_length,
+                        pcr.alignment.template_length if (pcr.alignment.template_length <= 1000 and pcr.alignment.template_length >= 36) else None,
                         w_i,
                     ]
+
+                    if pcr.alignment.template_length >1000 or pcr.alignment.template_length<36:
+                        logging.info("Read %s at pos %d has deviating template length of %d, set to None"%(pcr.alignment.query_name, pcr.alignment.reference_start, pcr.alignment.template_length))
+
                     reads_considered.add(pcr.alignment.query_name)
         i += 1
         if i % 10000 == 0:
@@ -1295,6 +1343,108 @@ def impute_diploid(R, sigma, emission, nhap=None, n_iter=3,
         print("Phasing: recast_haps corrected %d/%d sites" % (n_recast, n))
 
     return p1, p2, emission, phased_haps
+
+
+def estimate_ff_diploid(R, p1, p2):
+    """Estimate fetal fraction from diploid imputation residuals (LR method).
+
+    After diploid imputation converges, reads that fit the **diploid null
+    model** (equal 50/50 mixture of h1 and h2) better than either pure
+    haplotype are enriched for fetal (inherited-paternal) DNA.
+
+    **Method — per-read likelihood ratio test, normalised by informative sites**
+
+    For each read *r* with at least one *informative* site (where h1 and h2
+    differ, ``|p1[t] - p2[t]| > 0.3``)::
+
+        LR_r = (max(ll_h1_inf, ll_h2_inf) - ll_null_inf) / n_inf
+
+    where all likelihoods are summed only over the read's informative sites
+    and ``ll_null`` uses ``p_mix = 0.5*(p1+p2)``.
+
+    A maternal read aligning to its true haplotype gives ``LR_r > 0``.
+    A fetal read (carrying the paternal allele) fits the mixture better
+    than either pure haplotype, giving ``LR_r < 0``.
+
+    The soft fetal fraction is estimated as::
+
+        ff_lr = mean(max(0, -LR_r)) / log(2)
+
+    Division by ``log(2)`` (maximum possible penalty per informative site)
+    puts the result on a [0, 1] scale that is **independent of the number
+    of informative sites per read** and of the density of het sites in the
+    region.
+
+    Parameters
+    ----------
+    R : dict
+        Read dictionary from :func:`getR`.
+    p1, p2 : ndarray (n,)
+        Marginal P(alt) for the two imputed maternal haplotypes.
+
+    Returns
+    -------
+    dict with keys: n_reads, n_reads_informative, n_lr_negative, ff_lr
+    """
+    max_penalty_per_site = np.log(2.0)
+
+    lr_vals = []
+    n_total = 0
+
+    for r in R:
+        obs = R[r][0]
+        if not obs:
+            continue
+        n_total += 1
+
+        inf_obs = [(idx, allele, qual) for idx, allele, qual in obs
+                   if abs(p1[idx] - p2[idx]) > 0.3]
+        if not inf_obs:
+            continue
+
+        ll1_inf = ll2_inf = ll_null_inf = 0.0
+        for idx, allele, qual in inf_obs:
+            bq = qual if qual and qual > 0 else 30
+            p_err = 10.0 ** (-bq / 10.0)
+
+            def _ll(p_hap, al=allele, pe=p_err):
+                palt = p_hap * (1.0 - pe) + (1.0 - p_hap) * pe
+                return np.log((palt if al == 1 else 1.0 - palt) + 1e-300)
+
+            ll1_inf += _ll(p1[idx])
+            ll2_inf += _ll(p2[idx])
+            ll_null_inf += _ll(0.5 * (p1[idx] + p2[idx]))
+
+        n_inf = len(inf_obs)
+        lr_per_site = (max(ll1_inf, ll2_inf) - ll_null_inf) / n_inf
+        lr_vals.append(lr_per_site)
+
+    n_informative = len(lr_vals)
+    if n_informative == 0:
+        print("estimate_ff_diploid: no reads with informative sites — skipping.")
+        return {"n_reads": n_total, "n_reads_informative": 0,
+                "n_lr_negative": 0, "ff_lr": None}
+
+    lr_arr = np.array(lr_vals, dtype=np.float64)
+    fetal_signal = np.maximum(0.0, -lr_arr) / max_penalty_per_site
+    ff_lr = float(fetal_signal.mean())
+    n_lr_negative = int((lr_arr < 0).sum())
+
+    print(
+        "Diploid ff estimation (LR method):"
+        "\n  Total reads with variant observations   : %d"
+        "\n  Reads with >=1 informative site (h1!=h2) : %d"
+        "\n  Reads with LR < 0 (null fits better)     : %d"
+        "\n  Estimated ff (LR)                        : %.4f"
+        % (n_total, n_informative, n_lr_negative, ff_lr)
+    )
+
+    return {
+        "n_reads": n_total,
+        "n_reads_informative": n_informative,
+        "n_lr_negative": n_lr_negative,
+        "ff_lr": ff_lr,
+    }
 
 
 # ===================================================================
@@ -2235,7 +2385,7 @@ def _open_vcf_writer(vcffile):
 
 def outputvcf_diploid_marginals(p1, p2, R, emission,
                                 chrom, variants, vcffile, sample,
-                                phased_haps=None):
+                                phased_haps=None, ff_diploid=None):
     """Write diploid imputation results to VCF.
 
     Genotype probabilities from two marginal P(alt) vectors:
@@ -2262,6 +2412,8 @@ def outputvcf_diploid_marginals(p1, p2, R, emission,
         vcf = writer
         vcf.write("##fileformat=VCFv4.3\n")
         vcf.write("##total_reads=%d\n" % len(R))
+        if ff_diploid is not None:
+            vcf.write("##ff_diploid=%.4f\n" % ff_diploid)
         vcf.write('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n')
         vcf.write('##FORMAT=<ID=GP,Number=3,Type=Float,Description="Posterior diploid genotype probability of 0/0, 0/1, and 1/1">\n')
         vcf.write('##FORMAT=<ID=DS,Number=1,Type=Float,Description="Dosage">\n')
@@ -2357,7 +2509,44 @@ def outputvcf(gammaIMH, gammaNIMH, gammaIPH, R, emission,
     for lbl, idx in (("IMH", order[2]), ("NIMH", order[1]), ("IPH", order[0])):
         arr = np.array(iszd[idx])
         if len(arr):
-            print("Insertsize %s: mean=%.1f std=%.1f n=%d" % (lbl, arr.mean(), arr.std(), len(arr)))
+            print("Insertsize %s (hard-assigned): median=%.1f mean=%.1f std=%.1f n=%d" % (lbl, np.median(arr), arr.mean(), arr.std(), len(arr)))
+
+    p_im = _hap_marginal_palt(gammaIMH, emission)
+    p_nim = _hap_marginal_palt(gammaNIMH, emission)
+    p_ip = _hap_marginal_palt(gammaIPH, emission)
+
+    lbl_names = ["IMH", "NIMH", "IPH"]
+    isz_conf = [[] for _ in range(3)]
+    for r in R:
+        tlen = abs(R[r][3])
+        if tlen == 0:
+            continue
+        lls = np.array([
+            _read_loglik_under_hap(R, r, p_im),
+            _read_loglik_under_hap(R, r, p_nim),
+            _read_loglik_under_hap(R, r, p_ip),
+        ])
+        lls -= lls.max()
+        w = np.exp(lls)
+        w /= w.sum()
+        best_lbl = int(np.argmax(w))
+        conf = float(w[best_lbl])
+        isz_conf[best_lbl].append((tlen, conf))
+
+    print("Insertsize (likelihood-only posteriors, no prior):")
+    for lbl_name, lbl_idx in (("IMH", 0), ("NIMH", 1), ("IPH", 2)):
+        entries = isz_conf[lbl_idx]
+        if not entries:
+            continue
+        isz_arr = np.array([x[0] for x in entries])
+        conf_arr = np.array([x[1] for x in entries])
+        wmean = float(np.average(isz_arr, weights=conf_arr))
+        print("  %s: conf-weighted mean=%.1f  n=%d" % (lbl_name, wmean, len(entries)))
+        for thr in (0.5, 0.7, 0.9):
+            mask = conf_arr >= thr
+            if mask.sum() > 0:
+                print("    conf>=%.1f: mean=%.1f std=%.1f n=%d" % (
+                    thr, isz_arr[mask].mean(), isz_arr[mask].std(), mask.sum()))
 
     refaltcnt = emission.sum(axis=0, dtype=np.int64)
 
@@ -2489,18 +2678,37 @@ def load_genotypes_from_file(ifile_idx, filepath, n, positions,
                 try:
                     for pos, refa, alt in positions[chrom]:
                         rc = ac = 0
+                        is_indel = len(refa) != 1 or len(alt) != 1
+                        ins_len = len(alt) - len(refa) if is_indel and len(alt) > len(refa) else 0
+                        del_len = len(refa) - len(alt) if is_indel and len(refa) > len(alt) else 0
                         for pc in bamfile.pileup(chrom_try, pos - 1, pos, truncate=True,
                                                  max_depth=255,
                                                  multiple_iterators=False,
                                                  flag_filter=filterflag):
                             for pcr in pc.pileups:
-                                if pcr.query_position is None:
-                                    continue
-                                pb = pcr.alignment.query_sequence[pcr.query_position]
-                                if pb == refa:
-                                    rc += 1
-                                elif pb == alt:
-                                    ac += 1
+                                if is_indel:
+                                    if ins_len > 0:
+                                        if pcr.query_position is None:
+                                            continue
+                                        if pcr.indel == ins_len:
+                                            ac += 1
+                                        elif pcr.indel == 0:
+                                            rc += 1
+                                    else:
+                                        if pcr.query_position is None:
+                                            if abs(pcr.indel) == del_len:
+                                                ac += 1
+                                        else:
+                                            if pcr.indel == 0:
+                                                rc += 1
+                                else:
+                                    if pcr.query_position is None:
+                                        continue
+                                    pb = pcr.alignment.query_sequence[pcr.query_position]
+                                    if pb == refa:
+                                        rc += 1
+                                    elif pb == alt:
+                                        ac += 1
                         rc = min(rc, 255)
                         ac = min(ac, 255)
                         if rc or ac:
@@ -2592,8 +2800,12 @@ def build_reference(targetfile, ifiles, outputprefix="imputeff",
                 chrom = chrom[3:]
             pos = rec.pos
             ref = rec.ref
-            if len(rec.alts) != 1:
+            if not rec.alts:
                 continue
+            if len(rec.alts) > 1:
+                logging.warning(
+                    "Multi-allelic site %s POS=%d (ALTs: %s): only REF vs first ALT (%s) used",
+                    rec.id or '.', rec.pos, ','.join(rec.alts), rec.alts[0])
             alt = rec.alts[0]
             if pp is not None:
                 sigma.append(1 - ((pos - pp) * (avgr / 1e6)))
