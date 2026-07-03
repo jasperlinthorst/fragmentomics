@@ -2486,7 +2486,7 @@ def outputvcf(gammaIMH, gammaNIMH, gammaIPH, R, emission,
     iszd = [[], [], []]
     for r in R:
         readcnt[R[r][1]] += 1
-        if abs(R[r][3])!=None:
+        if R[r][3]!=None:
             iszd[R[r][1]].append(abs(R[r][3]))
 
     order = np.argsort(readcnt)
