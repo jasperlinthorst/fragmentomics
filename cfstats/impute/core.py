@@ -806,11 +806,11 @@ def getR(file, chrom, variants, ref=None,
                         [(i, a, pq)],
                         0 if s < 0.5 else 1 if s < 1 - (ff / 2) else 2,
                         None,
-                        pcr.alignment.template_length if (pcr.alignment.template_length <= 1000 and pcr.alignment.template_length >= 36) else None,
+                        abs(pcr.alignment.template_length) if (abs(pcr.alignment.template_length) <= 1000 and abs(pcr.alignment.template_length) >= 36) else None,
                         w_i,
                     ]
 
-                    if pcr.alignment.template_length >1000 or pcr.alignment.template_length<36:
+                    if abs(pcr.alignment.template_length) >1000 or abs(pcr.alignment.template_length)<36:
                         logging.info("Read %s at pos %d has deviating template length of %d, set to None"%(pcr.alignment.query_name, pcr.alignment.reference_start, pcr.alignment.template_length))
 
                     reads_considered.add(pcr.alignment.query_name)
