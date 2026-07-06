@@ -141,6 +141,48 @@ def wps(bam_file, chromosome, start_query, end_query, k=120, min_len=120, max_le
     wps_scores = spanning_count - endpoint_count
     return wps_scores
 
+def fft_wps_intensity(signal, ampmin=193, ampmax=199, pmin=120, pmax=280, npoints=100):
+    """Mean periodogram intensity of a WPS signal in a target nucleosome period band.
+
+    This mirrors the per-gene computation performed inside
+    ``worker_fourier_transform_samfile``: compute the periodogram of the WPS
+    signal, restrict to periods in ``[pmin, pmax]`` bp, interpolate onto a fine
+    grid, and return the mean intensity over the ``[ampmin, ampmax]`` bp band
+    (the ~193-199 bp nucleosome-spacing band used in Stanley et al. 2024).
+
+    Args:
+        signal (array-like): 1D WPS profile over a gene window.
+        ampmin, ampmax (float): Period band (bp) over which the mean is taken.
+        pmin, pmax (float): Broader period band (bp) used for interpolation.
+        npoints (int): Number of interpolation points in the target band.
+
+    Returns:
+        float: Mean intensity in the target band, or ``np.nan`` when the signal
+        is empty/degenerate.
+    """
+    signal = np.asarray(signal, dtype=float)
+    if signal.size == 0 or np.all(np.isnan(signal)) or np.all(signal == signal.flat[0]):
+        return np.nan
+
+    frequencies, power_spectrum = periodogram(signal, fs=1, scaling='spectrum')
+    if frequencies.size < 2:
+        return np.nan
+
+    periods = 1 / frequencies[1:]
+    intensity = power_spectrum[1:]
+
+    period_mask = (periods >= pmin) & (periods <= pmax)
+    target_periods = periods[period_mask]
+    target_intensity = intensity[period_mask]
+    if target_periods.size < 2:
+        return np.nan
+
+    interpolation_function = interp1d(
+        target_periods, target_intensity, bounds_error=False, fill_value=np.nan)
+    fine_periods = np.linspace(ampmin, ampmax, npoints)
+    return float(np.nanmean(interpolation_function(fine_periods)))
+
+
 def worker_fourier_transform_samfile(pl):
     import traceback, sys
 

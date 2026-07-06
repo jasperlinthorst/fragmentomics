@@ -166,12 +166,14 @@ would follow similar structure with three haplotypes and ff-weighted emissions.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import io
 import logging
 import multiprocessing
 import os
 import pickle
 import random
+import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -423,12 +425,121 @@ def sigma_from_positions(positions, nGen, minp=0.01, genetic_map=None):
     return sigma
 
 
+CACHE_VERSION = 1
+
+
+def _file_fingerprint(path):
+    """Fast content fingerprint of *path* using ``(size, mtime_ns)``.
+
+    Avoids reading/hashing the (potentially huge) file: ``os.stat`` is O(1)
+    and reliably changes whenever the reference is modified or replaced.
+    Also folds in the fingerprint of the tabix/csi index if present, so a
+    re-indexed reference invalidates the cache too.
+    """
+    parts = []
+    for p in (path, path + '.tbi', path + '.csi'):
+        try:
+            st = os.stat(p)
+            parts.append('%s:%d:%d' % (os.path.basename(p), st.st_size, st.st_mtime_ns))
+        except OSError:
+            continue
+    return '|'.join(parts)
+
+
+def _genetic_map_fingerprint(genetic_map):
+    """Cheap fingerprint of a pre-loaded genetic map tuple (or ``None``)."""
+    if genetic_map is None:
+        return 'none'
+    map_pos, map_cM = genetic_map
+    map_pos = np.asarray(map_pos)
+    map_cM = np.asarray(map_cM)
+    return 'gm:%d:%.6f:%.6f' % (
+        map_pos.size,
+        float(map_cM[0]) if map_cM.size else 0.0,
+        float(map_cM[-1]) if map_cM.size else 0.0,
+    )
+
+
+def _ref_cache_path(vcf, contig, start, stop, nGen, avgr, minp, genetic_map):
+    """Compute the cache file path for a given VCF + region + parameters.
+
+    The cache is keyed on the parameters that affect the result and validated
+    at load time against :func:`_file_fingerprint`, so users never need to
+    manage it manually.
+    """
+    key = '|'.join(str(x) for x in (
+        CACHE_VERSION, os.path.abspath(vcf), contig, start, stop,
+        nGen, avgr, minp, _genetic_map_fingerprint(genetic_map),
+    ))
+    digest = hashlib.sha1(key.encode()).hexdigest()[:16]
+    base = os.path.basename(vcf)
+    cache_dir = os.path.join(
+        os.path.dirname(os.path.abspath(vcf)) or '.', '.cfstats_ref_cache')
+    return os.path.join(cache_dir, '%s.%s.npz' % (base, digest))
+
+
+def _load_ref_cache(cache_path, fingerprint):
+    """Return cached ``(sigma, emission, variants)`` if valid, else ``None``."""
+    if not os.path.exists(cache_path):
+        return None
+    try:
+        data = np.load(cache_path, allow_pickle=False)
+        if str(data['fingerprint']) != fingerprint:
+            logging.info("Reference cache stale (reference changed), rebuilding.")
+            return None
+        sigma = data['sigma']
+        emission = data['emission']
+        ids = data['ids']
+        positions = data['positions']
+        refs = data['refs']
+        alts = data['alts']
+        variants = [
+            (str(i), int(p), str(r), str(a))
+            for i, p, r, a in zip(ids, positions, refs, alts)
+        ]
+        logging.info("Loaded reference from cache: %s (%d variants)",
+                     cache_path, len(variants))
+        return sigma, emission, variants
+    except Exception as exc:
+        logging.warning("Failed to read reference cache %s (%s), rebuilding.",
+                        cache_path, exc)
+        return None
+
+
+def _save_ref_cache(cache_path, fingerprint, sigma, emission, variants):
+    """Persist ``(sigma, emission, variants)`` to *cache_path* atomically."""
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        ids = np.array([str(v[0]) for v in variants])
+        positions = np.array([int(v[1]) for v in variants], dtype=np.int64)
+        refs = np.array([str(v[2]) for v in variants])
+        alts = np.array([str(v[3]) for v in variants])
+        tmp = cache_path + '.tmp%d' % os.getpid()
+        np.savez(tmp, fingerprint=np.array(fingerprint),
+                 sigma=sigma, emission=emission,
+                 ids=ids, positions=positions, refs=refs, alts=alts)
+        # np.savez appends .npz to the given name
+        os.replace(tmp + '.npz', cache_path)
+        logging.info("Cached reference to %s", cache_path)
+    except Exception as exc:
+        logging.warning("Failed to write reference cache %s (%s).",
+                        cache_path, exc)
+
+
 def loadref_vcf(vcf, contig=None, start=None, stop=None,
                 nGen=100, avgr=1, minp=0.01, genetic_map=None):
     """Load a phased reference VCF and return ``(sigma, emission, variants)``.
 
+    Results are transparently cached in a ``.cfstats_ref_cache`` directory
+    next to the reference VCF and reused on subsequent runs.  The cache is
+    keyed on the region/parameters and validated against a fast
+    ``(size, mtime)`` fingerprint of the VCF (and its index), so any change
+    to the reference automatically triggers reprocessing -- no manual cache
+    management required.
+
     Tries ``bcftools`` for fast bulk GT extraction first; falls back to
-    ``pysam`` if bcftools is unavailable.
+    ``pysam`` if bcftools is unavailable (and logs a warning, since this is
+    considerably slower).
 
     Automatically detects and loads cfstats-trained model VCFs (with IMP_K
     header) vs regular phased reference VCFs.
@@ -454,13 +565,36 @@ def loadref_vcf(vcf, contig=None, start=None, stop=None,
     if _is_trained_model_vcf(vcf):
         logging.info("Detected trained model VCF format")
         return _loadref_vcf_trained(vcf, contig, start, stop)
-    try:
-        return _loadref_vcf_bcftools(vcf, contig, start, stop, nGen, avgr, minp,
-                                     genetic_map=genetic_map)
-    except (FileNotFoundError, OSError, subprocess.CalledProcessError):
-        print("bcftools not available, falling back to pysam (slower).")
-        return _loadref_vcf_pysam(vcf, contig, start, stop, nGen, avgr, minp,
-                                   genetic_map=genetic_map)
+
+    # --- transparent caching --------------------------------------------
+    cache_path = _ref_cache_path(vcf, contig, start, stop, nGen, avgr, minp,
+                                 genetic_map)
+    fingerprint = _file_fingerprint(vcf)
+    cached = _load_ref_cache(cache_path, fingerprint)
+    if cached is not None:
+        return cached
+
+    if shutil.which('bcftools') is None:
+        logging.warning(
+            "bcftools not found on PATH; falling back to pysam for reference "
+            "loading, which is considerably slower. Install bcftools for "
+            "faster reference loading.")
+        result = _loadref_vcf_pysam(vcf, contig, start, stop, nGen, avgr, minp,
+                                    genetic_map=genetic_map)
+    else:
+        try:
+            result = _loadref_vcf_bcftools(vcf, contig, start, stop, nGen,
+                                           avgr, minp, genetic_map=genetic_map)
+        except (FileNotFoundError, OSError, subprocess.CalledProcessError) as exc:
+            logging.warning(
+                "bcftools reference loading failed (%s); falling back to "
+                "pysam, which is considerably slower.", exc)
+            result = _loadref_vcf_pysam(vcf, contig, start, stop, nGen, avgr,
+                                        minp, genetic_map=genetic_map)
+
+    sigma, emission, variants = result
+    _save_ref_cache(cache_path, fingerprint, sigma, emission, variants)
+    return result
 
 
 def _is_trained_model_vcf(vcf_path):
