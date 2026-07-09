@@ -899,11 +899,17 @@ def getR(file, chrom, variants, ref=None,
                         else:
                             continue
                     else:
-                        # Deletion: pcr.indel < 0 or query_position is None
+                        # Deletion: pysam reports the deletion length at the
+                        # anchor base *upstream* of the deleted bases via a
+                        # negative pcr.indel.  Reads with the anchor base and
+                        # indel == -del_len carry the deletion (alt); reads with
+                        # indel == 0 are reference.  If the pileup site itself
+                        # lies inside a deletion, query_position is None and
+                        # pcr.indel is the next operation after the deletion, so
+                        # we cannot count it reliably here.
                         if pcr.query_position is None:
-                            # Read has a deletion here
-                            pq = 30  # no base quality for deletions; use placeholder
                             if abs(pcr.indel) == del_len:
+                                pq = 30  # no base quality for deletions; use placeholder
                                 a = 1
                             else:
                                 continue
@@ -911,6 +917,8 @@ def getR(file, chrom, variants, ref=None,
                             pq = pcr.alignment.query_qualities[pcr.query_position]
                             if pcr.indel == 0:
                                 a = 0
+                            elif pcr.indel == -del_len:
+                                a = 1
                             else:
                                 continue
                 else:
@@ -2832,12 +2840,17 @@ def load_genotypes_from_file(ifile_idx, filepath, n, positions,
                                         elif pcr.indel == 0:
                                             rc += 1
                                     else:
+                                        # Deletion: pysam reports the deletion
+                                        # length at the upstream anchor base
+                                        # via a negative pcr.indel.
                                         if pcr.query_position is None:
                                             if abs(pcr.indel) == del_len:
                                                 ac += 1
                                         else:
                                             if pcr.indel == 0:
                                                 rc += 1
+                                            elif pcr.indel == -del_len:
+                                                ac += 1
                                 else:
                                     if pcr.query_position is None:
                                         continue

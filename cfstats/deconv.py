@@ -136,22 +136,41 @@ def _aggregate_h5ad(h5ad_path, cell_type_col=None, min_cells=10):
     gene_ids = [_strip_gene_version(g) for g in gene_ids]
 
     # --- resolve cell-type column --------------------------------------
+    # Candidate columns that hold human-readable cell-type labels. We never use
+    # '*_ontology_term_id' columns: those hold CL: identifiers, not names, and
+    # are just an encoded duplicate of the corresponding label column.
+    candidates = (
+        "cell_ontology_class", "free_annotation", "cell_type_assigned",
+        "annotation", "celltype", "cell_type", "broad_cell_class",
+    )
     if cell_type_col is None:
         log.info("Available .obs columns: %s", list(adata.obs.columns))
-        for col in ("cell_type_ontology_term_id", "free_annotation",
-                    "cell_ontology_class", "cell_type_assigned",
-                    "annotation", "celltype", "cell_type"):
-            if col in adata.obs.columns:
-                cell_type_col = col
-                break
+        present = [c for c in candidates if c in adata.obs.columns]
+        if present:
+            # data-driven: pick the finest-grained available annotation.
+            cardinalities = {c: int(adata.obs[c].nunique()) for c in present}
+            log.info("Candidate cell-type columns (name: #types): %s", cardinalities)
+            cell_type_col = max(cardinalities, key=cardinalities.get)
     if cell_type_col is None or cell_type_col not in adata.obs.columns:
         raise RuntimeError(
             "Could not find a cell-type column in the atlas .obs. "
             f"Available columns: {list(adata.obs.columns)}. "
             "Specify one with --cell-type-col."
         )
-    log.info("Using cell-type column '%s' (%d unique types)",
-             cell_type_col, adata.obs[cell_type_col].nunique())
+    n_types = int(adata.obs[cell_type_col].nunique())
+    log.info("Using cell-type column '%s' (%d unique types)", cell_type_col, n_types)
+
+    # Warn if the atlas is a single-tissue subset: cfDNA deconvolution against a
+    # blood-only atlas can only resolve blood/immune cell types (few dozen at
+    # most). Hundreds of cell types require the full multi-tissue atlas.
+    if "tissue" in adata.obs.columns:
+        tissues = list(pd.unique(adata.obs["tissue"].astype(str)))
+        if len(tissues) <= 1:
+            log.warning(
+                "Atlas covers a single tissue (%s) with only %d cell types. "
+                "Cell-type resolution is limited to this tissue; use a full "
+                "multi-tissue atlas via --atlas-url/--reference-atlas for "
+                "hundreds of cell types.", tissues, n_types)
 
     X = adata.X
     labels = adata.obs[cell_type_col].astype(str).values

@@ -180,6 +180,35 @@ def main():
     parser_nucs.add_argument('--min-distance', dest='min_distance', type=int, default=147, help='Minimum distance between nucleosome peaks (bp)')
     parser_nucs.set_defaults(func=lazy_cmd('nucs', 'nucs'))
 
+    parser_gcbias = subparsers.add_parser('gcbias', prog="cfstats gcbias", description="Estimate per-sample GC-bias correction table (length x num_GC) for use by 'siteprofile'. Run once per sample before 'siteprofile'.", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
+    parser_gcbias.add_argument('samfiles', nargs='*', help='sam/bam/cram file(s)')
+    parser_gcbias.add_argument("--bamlist", dest="bamlist", type=str, default=None, help="File containing a list of sam/bam/cram files (one per line).")
+    parser_gcbias.add_argument("--size-range", dest="size_range", nargs=2, type=int, default=(100, 200), help="Fragment length range to model (nucleosome-sized by default).")
+    parser_gcbias.add_argument("--gc-samples", dest="gc_samples", type=int, default=200000, help="Number of random genomic windows used to estimate expected GC frequency.")
+    parser_gcbias.add_argument("--chroms", dest="chroms", nargs='*', default=['chr'+str(i) for i in range(1, 23)], help="Chromosomes to sample for expected GC frequency.")
+    parser_gcbias.add_argument("--out-dir", dest="out_dir", type=str, default='.', help="Directory for per-sample <sample>.GC_bias.txt outputs.")
+    parser_gcbias.set_defaults(func=lazy_cmd('gcbias', 'gcbias'))
+
+    parser_siteprofile = subparsers.add_parser('siteprofile', prog="cfstats siteprofile", description="Compute Griffin-style composite GC-corrected nucleosome coverage profiles and features (mean/central coverage, FFT amplitude) around a list of sites. Sites can be a Griffin-style YAML or a BED file.", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
+    parser_siteprofile.add_argument('sitesfile', help='Site list: Griffin-style YAML (site-list name -> tsv) or a BED file.')
+    parser_siteprofile.add_argument('samfiles', nargs='*', help='sam/bam/cram file(s)')
+    parser_siteprofile.add_argument("--bamlist", dest="bamlist", type=str, default=None, help="File containing a list of sam/bam/cram files (one per line).")
+    parser_siteprofile.add_argument("--gc-bias", dest="gc_bias", type=str, default=None, help="GC-bias table from 'cfstats gcbias'. If omitted, coverage is uncorrected.")
+    parser_siteprofile.add_argument("--size-range", dest="size_range", nargs=2, type=int, default=(100, 200), help="Fragment length range to include.")
+    parser_siteprofile.add_argument("--norm-window", dest="norm_window", nargs=2, type=int, default=(-5000, 5000), help="Window around each site used for normalization.")
+    parser_siteprofile.add_argument("--save-window", dest="save_window", nargs=2, type=int, default=(-1000, 1000), help="Window used for the mean_coverage/amplitude features.")
+    parser_siteprofile.add_argument("--center-window", dest="center_window", nargs=2, type=int, default=(-30, 30), help="Window used for the central_coverage feature.")
+    parser_siteprofile.add_argument("--step", dest="step", type=int, default=15, help="Bin size (bp) for the coverage profile.")
+    parser_siteprofile.add_argument("--fft-index", dest="fft_index", type=int, default=10, help="FFT component index used for the amplitude feature.")
+    parser_siteprofile.add_argument("--smoothing-length", dest="smoothing_length", type=int, default=165, help="Savitzky-Golay window length (bp; ~ mean fragment length).")
+    parser_siteprofile.add_argument("--no-smoothing", dest="smoothing", action="store_false", default=True, help="Disable Savitzky-Golay smoothing of the composite profile.")
+    parser_siteprofile.add_argument("--chroms", dest="chroms", nargs='*', default=None, help="Restrict sites to these chromosomes (default: all).")
+    parser_siteprofile.add_argument("--chrom-column", dest="chrom_column", default='Chrom', help="Chromosome column name (YAML/tsv site lists).")
+    parser_siteprofile.add_argument("--position-column", dest="position_column", default='position', help="Position column name (YAML/tsv site lists).")
+    parser_siteprofile.add_argument("--strand-column", dest="strand_column", default='Strand', help="Strand column name (YAML/tsv site lists).")
+    parser_siteprofile.add_argument("--save-profile", dest="save_profile", type=str, default=None, help="Directory to write full binned composite profiles (<sample>.<site_list>.profile.tsv).")
+    parser_siteprofile.set_defaults(func=lazy_cmd('siteprofile', 'siteprofile'))
+
     parser_ff = subparsers.add_parser('ff', prog="cfstats ff", description="Estimate ff", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_ff.add_argument('samfiles', nargs='+', help='sam/bam/cram files for which ff should be predicted')
     parser_ff.add_argument('--model', dest='model', default=get_model_path('ffpredictor_50kautosomalbins.pickle'), help='Regression model that can be used to predict the fetal fraction.')
@@ -225,7 +254,6 @@ def main():
     parser_imputeref.set_defaults(func=lazy_cmd('impute.cli', 'imputeref'))
 
     # --- impute: genotype imputation (diploid / NIPT triploid) -----------
-    # Direct imputation using a reference panel (no subcommand needed)
     parser_impute = subparsers.add_parser(
         'impute', prog="cfstats impute",
         description="Impute genotypes from a BAM/CRAM using a phased population reference panel (trained model VCF, or standard hap/legend).",
