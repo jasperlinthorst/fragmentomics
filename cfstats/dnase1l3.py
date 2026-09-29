@@ -7,6 +7,7 @@ import sys
 import logging
 
 from cfstats import csm, fszd, fpends
+from cfstats.utils import collect_bam_files
 import os
 
 import joblib
@@ -30,6 +31,7 @@ def dnase1l3(args, cmdline=True):
     args.insertissize=True
     args.lower=0
     args.upper=1000
+    args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
     args.bamlist=None
 
     Xfszd=np.array(fszd.fszd(args, cmdline=False, ))#.reshape(1,-1)
@@ -87,6 +89,7 @@ def plot_fragmentome(args):
     args.insertissize=True
     args.lower=0
     args.upper=1000
+    args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
     args.bamlist=None
 
     Xfszd=np.array(fszd.fszd(args, cmdline=False, ))#.reshape(1,-1)

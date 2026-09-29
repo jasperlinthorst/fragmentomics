@@ -10,6 +10,8 @@ import sys
 from multiprocessing import Pool
 import logging as log_module
 
+from cfstats.utils import collect_bam_files
+
 
 def _soft_clipped(cigar):
     return any(operation in (4, 5, 6) for operation, length in (cigar or []))
@@ -274,6 +276,7 @@ def worker_fourier_transform_samfile(pl):
 
 def fourier_transform_coverage(args):
     logger = log_module.getLogger("cfstats.fourier")
+    args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
     if getattr(args, "leuven", False):
         if len(args.samfiles) != 1:
             raise ValueError("--leuven accepts exactly one BAM because stdout is one Leuven FFT table")

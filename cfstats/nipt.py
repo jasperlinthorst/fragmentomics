@@ -1,5 +1,6 @@
 import numpy as np
 from cfstats import bincounts, ff, utils
+from cfstats.utils import collect_bam_files
 from scipy.stats import norm
 import pandas as pd
 
@@ -48,6 +49,8 @@ def calc_llr_ff_t21(tup, ff=0.01): #initialize ff to 1%, then update if positive
     return (llrt21, ff)
 
 def nipt(args):
+
+    args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
 
     #load reference dataset
 

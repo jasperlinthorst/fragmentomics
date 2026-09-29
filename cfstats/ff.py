@@ -3,6 +3,7 @@ import sklearn
 import pickle
 import numpy as np
 from cfstats import bincounts
+from cfstats.utils import collect_bam_files
 import sys
 import logging
 
@@ -21,6 +22,8 @@ log = logging.getLogger(__name__)
 def ff(args, cmdline=True):
 
     hf_token = getattr(args, 'hf_token', None)
+
+    args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
 
     #for now use hardcoded match with how our model was trained
     args.binsize=50000

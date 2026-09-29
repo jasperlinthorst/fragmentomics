@@ -73,6 +73,8 @@ def worker_cleavesitemotifs(pl):
 
 def cleavesitemotifs(args, cmdline=True):
     
+    args.samfiles = utils.collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
+
     v=[]
     with Pool(args.nproc) as pool:
         results = pool.map(worker_cleavesitemotifs, zip(args.samfiles, [args]*len(args.samfiles)))
@@ -108,6 +110,8 @@ def cleavesitemotifs(args, cmdline=True):
 
 def cleavesitemotifs_old(args, cmdline=True):
     
+    args.samfiles = utils.collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
+
     for samfile in args.samfiles:
         if args.reference==None:
             raise ValueError("Reference file is required.")
@@ -185,6 +189,8 @@ def cleavesitemotifs_old(args, cmdline=True):
 
 def cleavesitemotifsbysize(args, cmdline=True):
     
+    args.samfiles = utils.collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
+
     for samfile in args.samfiles:
         if args.reference==None:
             raise ValueError("Reference file is required.")

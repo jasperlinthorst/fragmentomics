@@ -32,6 +32,7 @@ import pysam
 import gffutils
 
 from cfstats.ft import wps, fft_wps_intensity
+from cfstats.utils import collect_bam_files
 
 log = logging.getLogger("cfstats.deconv")
 
@@ -598,6 +599,8 @@ def deconv(args):
     fractional cell-type contributions, and writes a TSV where rows are samples
     and columns are cell types.
     """
+    args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
+
     ref = load_reference(args)
 
     # compute per-sample signals

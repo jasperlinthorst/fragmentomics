@@ -4,6 +4,7 @@ import sys
 
 
 from cfstats import utils
+from cfstats.utils import collect_bam_files
 
 from logging import log
 import numpy as np
@@ -88,6 +89,8 @@ def worker_5pends(pl):
 
 def _5pends(args, cmdline=True):
     
+    args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
+
     v=[]
     with Pool(args.nproc) as pool:
         results = pool.map(worker_5pends, zip(args.samfiles, [args]*len(args.samfiles)))
@@ -123,6 +126,8 @@ def _5pends(args, cmdline=True):
 
 def _5pendsbysize(args, cmdline=True):
     
+    args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
+
     k=args.k
     
     if args.purpyr:

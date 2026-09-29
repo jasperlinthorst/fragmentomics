@@ -23,7 +23,8 @@ import pandas as pd
 import pysam
 from scipy.signal import savgol_filter
 
-from cfstats.sites import load_sites, collect_bam_files
+from cfstats.sites import load_sites
+from cfstats.utils import collect_bam_files
 
 log = logging.getLogger(__name__)
 

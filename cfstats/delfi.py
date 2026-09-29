@@ -2,8 +2,12 @@ import pysam
 import sys
 import numpy as np
 
+from cfstats.utils import collect_bam_files
+
 
 def delfi(args, cmdline=True):
+
+    args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
 
     for samfile in args.samfiles:
         cram=pysam.AlignmentFile(samfile,reference_filename=args.reference)

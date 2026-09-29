@@ -54,10 +54,7 @@ def bincounts(args, cmdline=True):
     if args.reference==None:
         raise ValueError("Reference file is required.")
 
-    bamlist = getattr(args, 'bamlist', None)
-    if bamlist is not None:
-        with open(bamlist) as f:
-            args.samfiles = args.samfiles+[l.strip() for l in f.readlines()]
+    args.samfiles = utils.collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
 
     reflabels=[]
     #determine bin labels

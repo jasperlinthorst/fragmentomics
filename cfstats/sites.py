@@ -123,10 +123,4 @@ def load_sites(path, chrom_column="Chrom", position_column="position",
     return {name: _read_bed(path, chroms)}
 
 
-def collect_bam_files(samfiles, bamlist=None):
-    """Combine positional samfiles with an optional --bamlist file."""
-    files = list(samfiles) if samfiles else []
-    if bamlist:
-        with open(bamlist) as fh:
-            files += [line.strip() for line in fh if line.strip()]
-    return files
+from cfstats.utils import collect_bam_files

@@ -109,3 +109,12 @@ def get_N_content_from_fasta(fasta_path, chrom, start, end):
     subseq = seq[int(start):int(end)]
     Nc = subseq.count("N") / len(subseq) if len(subseq) > 0 else np.nan
     return Nc
+
+
+def collect_bam_files(samfiles, bamlist=None):
+    """Combine positional samfiles with an optional --bamlist file."""
+    files = list(samfiles) if samfiles else []
+    if bamlist:
+        with open(bamlist) as fh:
+            files += [line.strip() for line in fh if line.strip()]
+    return files

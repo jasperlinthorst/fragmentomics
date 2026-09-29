@@ -3,6 +3,7 @@ import pysam
 from scipy.signal import find_peaks
 
 from cfstats.ft import wps
+from cfstats.utils import collect_bam_files
 
 
 def _call_nucleosomes_from_wps(signal, start, chrom, min_prominence=5, min_distance=147):
@@ -74,6 +75,8 @@ def nucs(args, cmdline=True):
         - score: WPS value at peak
         - strand: "."
     """
+
+    args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
 
     k = args.k
     min_len = args.min_len

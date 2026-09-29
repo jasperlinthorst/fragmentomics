@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 import pysam
 
-from cfstats.sites import collect_bam_files
+from cfstats.utils import collect_bam_files
 
 log = logging.getLogger(__name__)
 
