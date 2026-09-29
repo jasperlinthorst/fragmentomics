@@ -3,7 +3,7 @@ import numpy as np
 import pysam
 import gffutils
 from scipy.fft import fft, fftfreq
-from scipy.signal import periodogram
+from scipy.signal import lfilter, periodogram
 from scipy.interpolate import interp1d
 import os
 import sys
@@ -11,323 +11,305 @@ from multiprocessing import Pool
 import logging as log_module
 
 
-def wps(bam_file, chromosome, start_query, end_query, k=120, min_len=120, max_len=180):
-    """Calculate the Windowed Protection Score (WPS) for a genomic region.
+def _soft_clipped(cigar):
+    return any(operation in (4, 5, 6) for operation, length in (cigar or []))
 
-    This implementation uses difference arrays (prefix sums) so that WPS is
-    accumulated in a *single pass* over fragments, avoiding an explicit
-    fragments×positions nested loop.
 
-    The semantics are unchanged relative to the previous version:
-    - For each genomic position `g` in [start_query, end_query), we consider a
-      window `[g - k//2, g + k//2)`.
-    - `spanning_count(g)` is the number of fragments that *fully span* this
-      window.
-    - `endpoint_within_count(g)` is the number of fragment endpoints that fall
-      inside this window (counting at most two endpoints per fragment and
-      avoiding double counting single‑base fragments).
-    - `WPS(g) = spanning_count(g) - endpoint_within_count(g)`.
+def _leuven_regions(path):
+    with open(path) as handle:
+        for line in handle:
+            fields = line.split()
+            if len(fields) != 5:
+                raise ValueError("Leuven annotation must have five columns: gene_id chromosome start end strand")
+            gene_id, chromosome, start, end, strand = fields
+            yield gene_id, chromosome, int(start), int(end), strand
 
-    Args:
-        bam_file: pysam.AlignmentFile
-        chromosome (str): Chromosome name (e.g., 'chr1').
-        start_query (int): Start coordinate of the query region (0-based, inclusive).
-        end_query (int): End coordinate of the query region (0-based, exclusive).
-        k (int): Window size (120 for L-WPS, 16 for S-WPS, etc.).
-        min_len (int): Minimum fragment length to consider.
-        max_len (int): Maximum fragment length to consider.
 
-    Returns:
-        numpy.ndarray: Array of WPS scores (length = end_query - start_query).
-    """
+def _next_235_length(length):
+    candidate = int(length)
+    while True:
+        remainder = candidate
+        for factor in (2, 3, 5):
+            while remainder % factor == 0:
+                remainder //= factor
+        if remainder == 1:
+            return candidate
+        candidate += 1
 
-    # Length of the query region
-    region_length = end_query - start_query
+
+def fft_wps_intensity(signal, ampmin=193, ampmax=199, pmin=120, pmax=280,
+                      npoints=100, args=None, taper=0.3, pad=0.3):
+    signal = np.asarray(signal, dtype=float)
+    if not getattr(args, "leuven", False):
+        if (signal.size == 0 or np.all(np.isnan(signal))
+                or np.all(signal == signal.flat[0])):
+            return np.nan
+        frequencies, power_spectrum = periodogram(
+            signal, fs=1, scaling='spectrum')
+        if frequencies.size < 2:
+            return np.nan
+        periods = 1 / frequencies[1:]
+        period_mask = (periods >= pmin) & (periods <= pmax)
+        target_periods = periods[period_mask]
+        target_intensity = power_spectrum[1:][period_mask]
+        if target_periods.size < 2:
+            return np.nan
+        interpolation_function = interp1d(
+            target_periods, target_intensity,
+            bounds_error=False, fill_value=np.nan)
+        fine_periods = np.linspace(ampmin, ampmax, npoints)
+        return float(np.nanmean(interpolation_function(fine_periods)))
+
+    recursive_filter = 1 / np.arange(5, 101, 4, dtype=float)
+    prefixed = np.concatenate((signal[:300], signal))
+    denominator = np.concatenate(([1.0], -recursive_filter))
+    signal = lfilter([1.0], denominator, prefixed)[300:]
+
+    trim = int(np.floor(0.1 * signal.size))
+    trimmed_mean = np.mean(np.sort(signal)[trim:signal.size - trim])
+    signal = signal - trimmed_mean
+
+    n_original = signal.size
+    time = np.arange(1, n_original + 1) - (n_original + 1) / 2
+    sum_time_squared = n_original * (n_original ** 2 - 1) / 12
+    signal = signal - np.mean(signal) - np.sum(signal * time) * time / sum_time_squared
+
+    taper_length = int(np.floor(n_original * taper))
+    weights = 0.5 * (1 - np.cos(
+        np.pi * np.arange(1, 2 * taper_length, 2) / (2 * taper_length)))
+    signal = signal * np.concatenate((
+        weights, np.ones(n_original - 2 * taper_length), weights[::-1]))
+
+    padded_length = n_original + int(n_original * pad)
+    fft_length = _next_235_length(padded_length)
+    signal = np.pad(signal, (0, fft_length - n_original))
+    periodogram_values = np.abs(np.fft.fft(signal)) ** 2 / n_original
+    periodogram_values[0] = 0.5 * (
+        periodogram_values[1] + periodogram_values[-1])
+    periodogram_values = (
+        0.5 * periodogram_values
+        + 0.25 * np.roll(periodogram_values, 1)
+        + 0.25 * np.roll(periodogram_values, -1))
+
+    n_spectrum = fft_length // 2
+    frequencies = np.arange(1, n_spectrum + 1) / fft_length
+    spectrum = periodogram_values[1:n_spectrum + 1]
+    spectrum /= 1 - (5 / 8) * taper * 2
+    rounded_periods = np.round(1 / frequencies)
+    return [float(spectrum[np.flatnonzero(rounded_periods == period)[0]])
+            for period in (193, 196, 199)]
+
+
+def wps(bam_file, chromosome, start_query, end_query, k=120, min_len=120,
+        max_len=180, args=None):
+    """Calculate WPS using the standard or Leuven definition selected by args."""
+    leuven = bool(getattr(args, "leuven", False))
+    region_length = end_query - start_query + int(leuven)
     if region_length <= 0:
-        return np.array([], dtype=int)
+        empty = np.array([], dtype=int)
+        return (empty, False) if leuven else empty
 
-    # Difference arrays for efficient accumulation
-    # span_diff: prefix-sum gives number of fragments that fully span the window
-    # end_diff:  prefix-sum gives number of endpoints that fall within the window
     span_diff = np.zeros(region_length + 1, dtype=int)
-    end_diff = np.zeros(region_length + 1, dtype=int)
-
-    # We need to fetch reads in an extended region to allow windows near the
-    # edges to be fully evaluated.
-    fetch_start = max(0, start_query - k)
-    fetch_end = end_query + k
+    subtract_diff = np.zeros(region_length + 1, dtype=int)
+    half = k // 2
+    fetch_start = max(0, start_query - (half + 1 if leuven else k))
+    fetch_end = end_query + (half + 1 if leuven else k)
+    covered = False
+    reqflag = getattr(args, "reqflag", None) if args is not None else None
+    exclflag = getattr(args, "exclflag", None) if args is not None else None
+    mapqual = getattr(args, "mapqual", None) if args is not None else None
 
     try:
         for read in bam_file.fetch(chromosome, fetch_start, fetch_end):
-            # Only use properly paired read1 to represent a fragment
-            if not (read.is_paired and read.is_proper_pair and read.is_read1):
+            if reqflag is not None and read.flag & reqflag != reqflag:
+                continue
+            if exclflag is not None and read.flag & exclflag:
+                continue
+            if mapqual is not None and read.mapping_quality < mapqual:
                 continue
 
-            template_length = abs(read.template_length)
-            if template_length < min_len or template_length > max_len:
-                continue
+            if leuven:
+                if _soft_clipped(read.cigartuples):
+                    continue
+                if not read.is_paired or read.mate_is_unmapped:
+                    continue
+                if read.next_reference_id != read.reference_id:
+                    continue
+                if not (read.is_read1 or
+                        (read.is_read2 and read.next_reference_start
+                         + read.query_length < fetch_start)):
+                    continue
+                fragment_length = abs(read.template_length)
+                if fragment_length == 0 or not min_len <= fragment_length <= max_len:
+                    continue
+                fragment_start = min(
+                    read.reference_start, read.next_reference_start) + 1
+                fragment_end = fragment_start + fragment_length - 1
+                covered |= (fragment_end >= start_query
+                            and fragment_start <= end_query)
 
-            # Derive fragment coordinates [frag_start, frag_end) in reference
-            if read.template_length > 0:
-                frag_start = read.reference_start
-                frag_end = read.reference_start + read.template_length
+                overlap_start = max(start_query, fragment_start - half + 1)
+                overlap_end = min(end_query, fragment_end + half - 1)
+                if overlap_start <= overlap_end:
+                    i = overlap_start - start_query
+                    j = overlap_end - start_query
+                    subtract_diff[i] -= 1
+                    subtract_diff[j + 1] += 1
+
+                span_start = max(start_query, fragment_start + half)
+                span_end = min(end_query, fragment_end - half)
+                if span_start <= span_end:
+                    i = span_start - start_query
+                    j = span_end - start_query
+                    span_diff[i] += 2
+                    span_diff[j + 1] -= 2
             else:
-                frag_start = read.reference_start + read.template_length
-                frag_end = read.reference_start
+                if not (read.is_paired and read.is_proper_pair and read.is_read1):
+                    continue
+                fragment_length = abs(read.template_length)
+                if not min_len <= fragment_length <= max_len:
+                    continue
+                if read.template_length > 0:
+                    fragment_start = read.reference_start
+                    fragment_end = read.reference_start + read.template_length
+                else:
+                    fragment_start = read.reference_start + read.template_length
+                    fragment_end = read.reference_start
+                if fragment_end <= fetch_start or fragment_start >= fetch_end:
+                    continue
 
-            # Skip fragments that do not overlap the broader region at all
-            if frag_end <= fetch_start or frag_start >= fetch_end:
-                continue
+                span_start = max(0, fragment_start + half - start_query)
+                span_end = min(
+                    region_length - 1, fragment_end - half - start_query)
+                if span_start <= span_end:
+                    span_diff[span_start] += 1
+                    span_diff[span_end + 1] -= 1
 
-            # --- 1. Fragments that COMPLETELY SPAN the window ---
-            # For a fragment [frag_start, frag_end), a window centered at g
-            # with bounds [g - k//2, g + k//2) is fully spanned when:
-            #   frag_start <= g - k//2  and  frag_end >= g + k//2
-            # => g >= frag_start + k//2  and  g <= frag_end - k//2
-            g_start_span = frag_start + k // 2
-            g_end_span = frag_end - k // 2
+                for endpoint in (fragment_start, fragment_end - 1):
+                    endpoint_start = max(
+                        0, endpoint - half + 1 - start_query)
+                    endpoint_end = min(
+                        region_length - 1, endpoint + half - start_query)
+                    if endpoint_start <= endpoint_end:
+                        subtract_diff[endpoint_start] += 1
+                        subtract_diff[endpoint_end + 1] -= 1
+    except Exception as error:
+        print(f"Error processing BAM file: {error}")
+        failed = np.full(region_length, np.nan)
+        return (failed, False) if leuven else failed
 
-            # Convert to index space of the query region (0..region_length-1)
-            i_start_span = g_start_span - start_query
-            i_end_span = g_end_span - start_query
-
-            # Clip to valid index range
-            if i_end_span < 0 or i_start_span > region_length - 1:
-                pass  # No contribution inside query region
-            else:
-                i_start_span = max(0, i_start_span)
-                i_end_span = min(region_length - 1, i_end_span)
-                if i_start_span <= i_end_span:
-                    span_diff[i_start_span] += 1
-                    span_diff[i_end_span + 1] -= 1
-
-            # --- 2. Fragments with an ENDPOINT WITHIN the window ---
-            # For an endpoint at position p (0-based), we count windows for
-            # which [g - k//2, g + k//2) contains p:
-            #   g - k//2 <= p < g + k//2
-            # => g > p - k//2  and  g <= p + k//2
-            # Integer g satisfy: g in [p - k//2 + 1, p + k//2].
-
-            def _add_endpoint(p):
-                g_min = p - k // 2 + 1
-                g_max = p + k // 2
-                i_start = g_min - start_query
-                i_end = g_max - start_query
-
-                if i_end < 0 or i_start > region_length - 1:
-                    return
-                i_start = max(0, i_start)
-                i_end = min(region_length - 1, i_end)
-                if i_start <= i_end:
-                    end_diff[i_start] += 1
-                    end_diff[i_end + 1] -= 1
-
-            # Fragment start endpoint
-            _add_endpoint(frag_start)
-
-            # Fragment end endpoint (frag_end - 1), avoiding double counting
-            if frag_start != frag_end - 1:
-                _add_endpoint(frag_end - 1)
-
-    except Exception as e:
-        print(f"Error processing BAM file: {e}")
-        return np.full(region_length, np.nan)
-
-    # Accumulate counts via prefix sums
-    spanning_count = np.cumsum(span_diff[:-1])
-    endpoint_count = np.cumsum(end_diff[:-1])
-
-    # WPS = fragments that span the window minus endpoints within the window
-    wps_scores = spanning_count - endpoint_count
-    return wps_scores
-
-def fft_wps_intensity(signal, ampmin=193, ampmax=199, pmin=120, pmax=280, npoints=100):
-    """Mean periodogram intensity of a WPS signal in a target nucleosome period band.
-
-    This mirrors the per-gene computation performed inside
-    ``worker_fourier_transform_samfile``: compute the periodogram of the WPS
-    signal, restrict to periods in ``[pmin, pmax]`` bp, interpolate onto a fine
-    grid, and return the mean intensity over the ``[ampmin, ampmax]`` bp band
-    (the ~193-199 bp nucleosome-spacing band used in Stanley et al. 2024).
-
-    Args:
-        signal (array-like): 1D WPS profile over a gene window.
-        ampmin, ampmax (float): Period band (bp) over which the mean is taken.
-        pmin, pmax (float): Broader period band (bp) used for interpolation.
-        npoints (int): Number of interpolation points in the target band.
-
-    Returns:
-        float: Mean intensity in the target band, or ``np.nan`` when the signal
-        is empty/degenerate.
-    """
-    signal = np.asarray(signal, dtype=float)
-    if signal.size == 0 or np.all(np.isnan(signal)) or np.all(signal == signal.flat[0]):
-        return np.nan
-
-    frequencies, power_spectrum = periodogram(signal, fs=1, scaling='spectrum')
-    if frequencies.size < 2:
-        return np.nan
-
-    periods = 1 / frequencies[1:]
-    intensity = power_spectrum[1:]
-
-    period_mask = (periods >= pmin) & (periods <= pmax)
-    target_periods = periods[period_mask]
-    target_intensity = intensity[period_mask]
-    if target_periods.size < 2:
-        return np.nan
-
-    interpolation_function = interp1d(
-        target_periods, target_intensity, bounds_error=False, fill_value=np.nan)
-    fine_periods = np.linspace(ampmin, ampmax, npoints)
-    return float(np.nanmean(interpolation_function(fine_periods)))
-
+    if leuven:
+        signal = np.cumsum(span_diff[:-1]) + np.cumsum(subtract_diff[:-1])
+        return signal, covered
+    return np.cumsum(span_diff[:-1]) - np.cumsum(subtract_diff[:-1])
 
 def worker_fourier_transform_samfile(pl):
-    import traceback, sys
+    import traceback
 
     try:
         samfile, args = pl
-
         logger = log_module.getLogger("cfstats.fourier")
-
         logger.debug(f"Processing samfile {samfile}")
+        bam = pysam.AlignmentFile(
+            samfile, "rb",
+            reference_filename=args.reference if args.reference is not None else None)
+        references = set(bam.references)
+        leuven = bool(getattr(args, "leuven", False))
+        values = {}
 
-        # Open the SAM/BAM/CRAM file
-        pysamfile = pysam.AlignmentFile(samfile, "rb", reference_filename=args.reference if args.reference is not None else None)
-        samctgs=set([ctg for ctg in pysamfile.references])
-        # pysamfile.close()
-        mean_intensities=[]
-        genes=[]
-        # Load the GFF file
-        db_filename = f'{args.gfffile}.db'
-        if not os.path.exists(db_filename):
-            logger.info("Constructing gene DB...")
-            db = gffutils.create_db(args.gfffile, dbfn=db_filename, force=True, keep_order=True, merge_strategy='merge', sort_attribute_values=True)
-            logger.info("Done.")
+        if leuven:
+            regions = _leuven_regions(args.gfffile)
         else:
-            logger.debug(f"Loading gene DB: {db_filename}")
-            db = gffutils.FeatureDB(db_filename, keep_order=True)
-            logger.debug("Done.")
-        
-        # Iterate over each gene in the GFF file
-        for gene in db.features_of_type('gene'):
-            # Get the coverage profile for the gene
-            # coverage = np.zeros(gene.end - gene.start + 1)
-            # coverage = np.zeros(10000+1)
+            db_filename = f'{args.gfffile}.db'
+            if not os.path.exists(db_filename):
+                logger.info("Constructing gene DB...")
+                db = gffutils.create_db(
+                    args.gfffile, dbfn=db_filename, force=True,
+                    keep_order=True, merge_strategy='merge',
+                    sort_attribute_values=True)
+            else:
+                db = gffutils.FeatureDB(db_filename, keep_order=True)
 
-            if gene.chrom not in samctgs:
-                if 'chr'+gene.chrom in samctgs:
-                    chrom='chr'+gene.chrom
-                else:
-                    logger.debug(f"{gene.chrom} not in samfile, skipping {gene}.")
+            def standard_regions():
+                for gene in db.features_of_type('gene'):
+                    if gene.strand == '-':
+                        start, end = gene.end - int(args.window), gene.end
+                    else:
+                        start, end = gene.start, gene.start + int(args.window)
+                    name = (gene.attributes["gene_name"][0]
+                            if "gene_name" in gene.attributes
+                            else gene.attributes["gene_id"][0])
+                    yield name, gene.chrom, start, end, gene.strand
+            regions = standard_regions()
+
+        try:
+            for name, chromosome, start, end, strand in regions:
+                bam_chromosome = (chromosome if chromosome in references
+                                  else 'chr' + chromosome)
+                if bam_chromosome not in references:
+                    logger.debug(f"{chromosome} not in samfile, skipping {name}.")
                     continue
-            else:
-                chrom=gene.chrom
-            
-            if gene.strand=='-':
-                start=gene.end-int(args.window)
-                end=gene.end
-            else:
-                start=gene.start
-                end=gene.start+int(args.window)
-            
-            logger.debug(f"Start WPS calculation for: {chrom}:{start}-{end}")
-            signal = wps(pysamfile, chrom, start, end)
-            
-            #TODO: check if below works better
-            #if gene.strand=='-':
-            #    signal=signal[::-1]
+                result = wps(
+                    bam, bam_chromosome, start, end,
+                    min_len=120, max_len=180, args=args)
+                if leuven:
+                    signal, covered = result
+                    if not covered:
+                        continue
+                    if strand == '-':
+                        signal = signal[::-1]
+                    values[name] = fft_wps_intensity(signal, args=args)
+                else:
+                    values[name] = fft_wps_intensity(
+                        result, ampmin=float(args.ampmin),
+                        ampmax=float(args.ampmax), args=args)
+        finally:
+            bam.close()
 
-            logger.debug("WPS done.")
-
-            # for read in pysamfile.fetch(chrom, start, end):
-            #     for ref_pos in read.get_reference_positions():
-            #         pos = ref_pos + 1  # 1-based
-            #         if start <= pos <= end:
-            #             coverage[pos - start] += 1
-
-            # Perform Fourier transform on the coverage profile
-            # fourier_transformed = fft(coverage)
-            
-            # signal = coverage
-            # print(signal)
-            logger.debug(f"Doing fft...")
-            frequencies, power_spectrum = periodogram(signal, fs=1, scaling='spectrum')
-            logger.debug("Done.")
-
-            periods = 1 / frequencies[1:]
-            intensity = power_spectrum[1:]
-
-            # --- 3. Focus on the Target Frequency Range (e.g., 193-199 bp) ---
-            # Filter for periods described in the source (e.g., 120 bp to 280 bp)
-            period_mask = (periods >= 120) & (periods <= 280)
-            target_periods = periods[period_mask]
-            target_intensity = intensity[period_mask]
-
-            # The sources mention using "smooth FFT periodograms" [7]. 
-            # We'll use interpolation (a form of smoothing) to find intensity at precise periods.
-            # NOTE: The intensity value is the amplitude/power at a given frequency.
-
-            # Define the specific range for correlation analysis (193-199 bp)
-            P_MIN = args.ampmin
-            P_MAX = args.ampmax
-
-            # Interpolate the periodogram to get a smoother curve (as required by sources)
-            # and evaluate intensity at points between P_MIN and P_MAX.
-            # We invert the periods for consistent indexing if needed, but here we interpolate directly.
-            logger.debug("Interpolating...")
-            interpolation_function = interp1d(target_periods, target_intensity)
-            logger.debug("Done.")
-            
-            # Create a fine array of periods in the target range
-            logger.debug("Creating fine periods...")
-            fine_periods = np.linspace(P_MIN, P_MAX, 100)
-            # Calculate the intensity at these fine points
-            intensity_at_fine_periods = interpolation_function(fine_periods)
-            logger.debug("Done.")
-
-            # --- 4. Calculate Mean Intensity (The value that corresponds to 'intensity') ---
-            # The mean intensity in the 193-199 bp range is the core value used for correlation.
-            mean_intensities.append(np.mean(intensity_at_fine_periods))
-            name=gene.attributes["gene_name"][0] if "gene_name" in gene.attributes else gene.attributes["gene_id"][0]
-            
-            genes.append(name)
-
-        return {'samfile': samfile, 'fft':{g:i for g,i in zip(genes, mean_intensities)}}
-
-    except Exception as e:
-        print("WORKER EXCEPTION:", e, file=sys.stderr)
+        return {'samfile': samfile, 'fft': values}
+    except Exception as error:
+        print("WORKER EXCEPTION:", error, file=sys.stderr)
         traceback.print_exc()
         raise
 
 def fourier_transform_coverage(args):
-    
     logger = log_module.getLogger("cfstats.fourier")
-    logger.debug("test")
-
-    header_written = False
+    if getattr(args, "leuven", False):
+        if len(args.samfiles) != 1:
+            raise ValueError("--leuven accepts exactly one BAM because stdout is one Leuven FFT table")
+        presets = {'-f': ('reqflag', 1), '-F': ('exclflag', 1548),
+                   '-q': ('mapqual', 0)}
+        explicit = getattr(args, '_explicit_filters', {})
+        for flag, (attribute, preset) in presets.items():
+            if explicit.get(flag, False):
+                value = getattr(args, attribute)
+                if value != preset:
+                    logger.warning(
+                        "%s %s overrides the Leuven preset %s",
+                        flag, value, preset)
+            else:
+                setattr(args, attribute, preset)
 
     if args.nproc > 1:
         with Pool(args.nproc) as pool:
-            for result in pool.imap_unordered(
+            results = pool.map(
                 worker_fourier_transform_samfile,
-                zip(args.samfiles, [args] * len(args.samfiles)),
-            ):
-                samfile = result["samfile"]
-                fft = result["fft"]
-
-                if not header_written:
-                    sys.stdout.write("#filename\t" + "\t".join(fft.keys()) + "\n")
-                    header_written = True
-                sys.stdout.write("\t".join([samfile] + list(map(str, fft.values())))+"\n")
+                zip(args.samfiles, [args] * len(args.samfiles)))
     else:
-        for samfile in args.samfiles:
-            result = worker_fourier_transform_samfile((samfile, args))
-            samfile_out = result["samfile"]
-            fft = result["fft"]
+        results = [worker_fourier_transform_samfile((samfile, args))
+                   for samfile in args.samfiles]
 
-            if not header_written:
-                sys.stdout.write("#filename\t" + "\t".join(fft.keys()) + "\n")
-                header_written = True
-            sys.stdout.write("\t".join([samfile_out] + list(map(str, fft.values())))+"\n")
+    if getattr(args, "leuven", False):
+        sys.stdout.write("#Region\t193\t196\t199\n")
+        for gene, values in results[0]['fft'].items():
+            sys.stdout.write(gene + "\t" + "\t".join(map(str, values)) + "\n")
+        return
+
+    header_written = False
+    for result in results:
+        fft_values = result['fft']
+        if not header_written:
+            sys.stdout.write("#filename\t" + "\t".join(fft_values) + "\n")
+            header_written = True
+        sys.stdout.write("\t".join(
+            [result['samfile']] + list(map(str, fft_values.values()))) + "\n")

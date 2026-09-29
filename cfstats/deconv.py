@@ -95,102 +95,186 @@ def _download(url, dest):
 # Reference matrix (genes x cell types) construction
 # ---------------------------------------------------------------------------
 
-def _aggregate_h5ad(h5ad_path, cell_type_col=None, min_cells=10):
+def _decode(x):
+    return x.decode() if isinstance(x, (bytes, bytearray)) else str(x)
+
+
+def _h5_read_strings(node):
+    """Read an h5py string dataset into a list of python str."""
+    return [_decode(x) for x in node[:]]
+
+
+def _h5_column_strings(group, key):
+    """Read an anndata dataframe column (dataset or categorical group) as str list."""
+    import h5py
+    node = group[key]
+    if isinstance(node, h5py.Group) and "categories" in node:
+        cats = _h5_read_strings(node["categories"])
+        codes = np.asarray(node["codes"][:])
+        return [cats[i] if i >= 0 else "nan" for i in codes]
+    return _h5_read_strings(node)
+
+
+def _h5_column_categorical(group, key):
+    """Return (categories:list[str], codes:np.ndarray[int]) for an obs column.
+
+    Handles both anndata categorical groups and plain string/label datasets.
+    """
+    import h5py
+    node = group[key]
+    if isinstance(node, h5py.Group) and "categories" in node:
+        cats = _h5_read_strings(node["categories"])
+        codes = np.asarray(node["codes"][:]).astype(np.int64)
+        return cats, codes
+    vals = pd.Series(_h5_read_strings(node)).astype("category")
+    return list(vals.cat.categories), np.asarray(vals.cat.codes, dtype=np.int64)
+
+
+def _h5_column_nunique(group, key):
+    import h5py
+    node = group[key]
+    if isinstance(node, h5py.Group) and "categories" in node:
+        return int(node["categories"].shape[0])
+    return int(pd.Series(_h5_read_strings(node)).nunique())
+
+
+def _aggregate_h5ad(h5ad_path, cell_type_col=None, min_cells=10, chunk_size=20000):
     """Aggregate a single-cell ``.h5ad`` into per-cell-type pseudobulk expression.
 
     Returns a DataFrame indexed by ENSG gene id with one column per cell type
     (mean expression across cells of that type, using the ``.X`` matrix which is
     log-normalised in cellxgene/Tabula Sapiens releases).
+
+    The ``.X`` CSR matrix is streamed directly from the HDF5 file with
+    ``h5py`` in row chunks of ``chunk_size`` cells: only the slice of
+    ``X/data`` / ``X/indices`` for the current chunk is read from disk, so the
+    full matrix (potentially millions of cells x 60k genes, tens of GB of
+    non-zeros) is never held in memory at once. anndata's ``read_h5ad`` is
+    intentionally avoided: even in backed mode it loads ``.obs``, ``.raw``,
+    ``.obsm`` and ``.layers`` into RAM, which OOMs on large atlases. Per-cell-
+    type sums are accumulated via a sparse one-hot matmul; peak memory is
+    dominated by the ``n_cell_types x n_genes`` accumulator (a few hundred MB)
+    plus one chunk of ``.X``.
     """
-    try:
-        import anndata
-        adata = anndata.read_h5ad(h5ad_path)
-    except ImportError:
-        try:
-            import scanpy as sc
-            adata = sc.read_h5ad(h5ad_path)
-        except ImportError:
+    import h5py
+    import scipy.sparse as sp
+
+    with h5py.File(h5ad_path, "r") as f:
+        # --- matrix layout ---------------------------------------------
+        Xg = f["X"]
+        if isinstance(Xg, h5py.Group):
+            enc = _decode(Xg.attrs.get("encoding-type", "csr_matrix"))
+            shape = tuple(int(s) for s in Xg.attrs["shape"])
+        else:
+            enc = "array"
+            shape = tuple(int(s) for s in Xg.shape)
+        n_obs, n_genes = shape
+        log.info("Atlas %s (%d cells x %d genes), X encoding=%s",
+                 os.path.basename(h5ad_path), n_obs, n_genes, enc)
+        if enc not in ("csr_matrix", "array"):
             raise RuntimeError(
-                "Reading .h5ad atlases requires 'anndata' (or 'scanpy'). "
-                "Install with: pip install anndata"
+                f"Unsupported X encoding '{enc}' (expected CSR or dense). "
+                "Re-export the atlas as CSR, or pre-build a matrix and pass it "
+                "via --reference-atlas."
             )
 
-    log.info("Loaded atlas %s (%d cells x %d genes)",
-             os.path.basename(h5ad_path), adata.n_obs, adata.n_vars)
+        # --- gene ids to ENSG ------------------------------------------
+        var = f["var"]
+        index_key = _decode(var.attrs.get("_index", "_index"))
+        gene_ids = _h5_column_strings(var, index_key)
+        if not str(gene_ids[0]).startswith("ENSG"):
+            for col in ("ensembl_id", "gene_ids", "gene_id", "ensembl",
+                        "ensembl_gene_id", "feature_id"):
+                if col in var:
+                    gene_ids = _h5_column_strings(var, col)
+                    log.info("Using var column '%s' for ENSG gene ids", col)
+                    break
+            else:
+                log.warning("No ENSG gene id column found; falling back to var index")
+        gene_ids = [_strip_gene_version(g) for g in gene_ids]
 
-    # --- resolve gene ids to ENSG --------------------------------------
-    var = adata.var
-    if str(adata.var_names[0]).startswith("ENSG"):
-        gene_ids = list(adata.var_names)
-    else:
-        gene_ids = None
-        for col in ("gene_ids", "gene_id", "ensembl_id", "ensembl",
-                    "ensembl_gene_id", "feature_id"):
-            if col in var.columns:
-                gene_ids = list(var[col])
-                log.info("Using var column '%s' for ENSG gene ids", col)
-                break
-        if gene_ids is None:
-            log.warning("No ENSG gene id column found; falling back to var_names")
-            gene_ids = list(adata.var_names)
-    gene_ids = [_strip_gene_version(g) for g in gene_ids]
-
-    # --- resolve cell-type column --------------------------------------
-    # Candidate columns that hold human-readable cell-type labels. We never use
-    # '*_ontology_term_id' columns: those hold CL: identifiers, not names, and
-    # are just an encoded duplicate of the corresponding label column.
-    candidates = (
-        "cell_ontology_class", "free_annotation", "cell_type_assigned",
-        "annotation", "celltype", "cell_type", "broad_cell_class",
-    )
-    if cell_type_col is None:
-        log.info("Available .obs columns: %s", list(adata.obs.columns))
-        present = [c for c in candidates if c in adata.obs.columns]
-        if present:
-            # data-driven: pick the finest-grained available annotation.
-            cardinalities = {c: int(adata.obs[c].nunique()) for c in present}
-            log.info("Candidate cell-type columns (name: #types): %s", cardinalities)
-            cell_type_col = max(cardinalities, key=cardinalities.get)
-    if cell_type_col is None or cell_type_col not in adata.obs.columns:
-        raise RuntimeError(
-            "Could not find a cell-type column in the atlas .obs. "
-            f"Available columns: {list(adata.obs.columns)}. "
-            "Specify one with --cell-type-col."
+        # --- resolve cell-type column ----------------------------------
+        obs = f["obs"]
+        obs_cols = list(obs.keys())
+        # Candidate columns that hold human-readable cell-type labels. We never
+        # use '*_ontology_term_id' columns: those hold CL: identifiers, not
+        # names, and are just an encoded duplicate of the label column.
+        candidates = (
+            "cell_ontology_class", "free_annotation", "cell_type_assigned",
+            "annotation", "celltype", "cell_type", "broad_cell_class",
         )
-    n_types = int(adata.obs[cell_type_col].nunique())
-    log.info("Using cell-type column '%s' (%d unique types)", cell_type_col, n_types)
+        if cell_type_col is None:
+            log.info("Available .obs columns: %s", obs_cols)
+            present = [c for c in candidates if c in obs_cols]
+            if present:
+                cardinalities = {c: _h5_column_nunique(obs, c) for c in present}
+                log.info("Candidate cell-type columns (name: #types): %s", cardinalities)
+                cell_type_col = max(cardinalities, key=cardinalities.get)
+        if cell_type_col is None or cell_type_col not in obs_cols:
+            raise RuntimeError(
+                "Could not find a cell-type column in the atlas .obs. "
+                f"Available columns: {obs_cols}. Specify one with --cell-type-col."
+            )
+        type_names, codes = _h5_column_categorical(obs, cell_type_col)
+        n_all_types = len(type_names)
+        log.info("Using cell-type column '%s' (%d unique types)",
+                 cell_type_col, n_all_types)
 
-    # Warn if the atlas is a single-tissue subset: cfDNA deconvolution against a
-    # blood-only atlas can only resolve blood/immune cell types (few dozen at
-    # most). Hundreds of cell types require the full multi-tissue atlas.
-    if "tissue" in adata.obs.columns:
-        tissues = list(pd.unique(adata.obs["tissue"].astype(str)))
-        if len(tissues) <= 1:
-            log.warning(
-                "Atlas covers a single tissue (%s) with only %d cell types. "
-                "Cell-type resolution is limited to this tissue; use a full "
-                "multi-tissue atlas via --atlas-url/--reference-atlas for "
-                "hundreds of cell types.", tissues, n_types)
+        # Warn if the atlas is a single-tissue subset.
+        if "tissue" in obs_cols:
+            n_tissues = _h5_column_nunique(obs, "tissue")
+            if n_tissues <= 1:
+                log.warning(
+                    "Atlas covers a single tissue with only %d cell types. "
+                    "Cell-type resolution is limited to this tissue; use a full "
+                    "multi-tissue atlas for hundreds of cell types.", n_all_types)
 
-    X = adata.X
-    labels = adata.obs[cell_type_col].astype(str).values
+        # --- streaming per-cell-type aggregation -----------------------
+        counts = np.bincount(codes[codes >= 0], minlength=n_all_types).astype(np.int64)
+        sums = np.zeros((n_all_types, n_genes), dtype=np.float64)
 
-    columns = {}
-    for ct in pd.unique(labels):
-        mask = labels == ct
-        n = int(mask.sum())
-        if n < min_cells:
-            continue
-        sub = X[mask]
-        mean = sub.mean(axis=0)
-        mean = np.asarray(mean).ravel()
-        columns[ct] = mean
-        log.debug("  %s: %d cells", ct, n)
+        n_chunks = (n_obs + chunk_size - 1) // chunk_size
+        if enc == "csr_matrix":
+            data_ds = Xg["data"]
+            indices_ds = Xg["indices"]
+            indptr = np.asarray(Xg["indptr"][:])
+        for ci, start in enumerate(range(0, n_obs, chunk_size)):
+            end = min(start + chunk_size, n_obs)
+            c = codes[start:end]
+            valid = c >= 0
+            if valid.any():
+                if enc == "csr_matrix":
+                    p0, p1 = int(indptr[start]), int(indptr[end])
+                    d = np.asarray(data_ds[p0:p1], dtype=np.float64)
+                    idx = np.asarray(indices_ds[p0:p1])
+                    iptr = indptr[start:end + 1] - p0
+                    Xc = sp.csr_matrix((d, idx, iptr), shape=(end - start, n_genes))
+                else:  # dense
+                    Xc = sp.csr_matrix(np.asarray(Xg[start:end], dtype=np.float64))
+                rows = c[valid]
+                cols = np.nonzero(valid)[0]
+                onehot = sp.csr_matrix(
+                    (np.ones(rows.size, dtype=np.float64), (rows, cols)),
+                    shape=(n_all_types, end - start),
+                )
+                contrib = onehot @ Xc
+                if sp.issparse(contrib):
+                    contrib = contrib.toarray()
+                sums += np.asarray(contrib, dtype=np.float64)
+            if (ci + 1) % 5 == 0 or ci + 1 == n_chunks:
+                log.info("  aggregated chunk %d/%d (through cell %d)",
+                         ci + 1, n_chunks, end)
 
-    if not columns:
+    # --- means, min-cells filter, DataFrame ----------------------------
+    keep = counts >= min_cells
+    if not keep.any():
         raise RuntimeError("No cell type had >= %d cells." % min_cells)
+    means = sums[keep] / counts[keep][:, None]  # (n_keep x n_genes)
+    kept_names = [type_names[i] for i in np.nonzero(keep)[0]]
+    log.info("Kept %d/%d cell types (>= %d cells)",
+             int(keep.sum()), n_all_types, min_cells)
 
-    ref = pd.DataFrame(columns, index=gene_ids)
+    ref = pd.DataFrame(means.T, index=gene_ids, columns=kept_names)
     # collapse duplicate ENSG ids (mean) that arise after version stripping
     ref = ref.groupby(level=0).mean()
     ref.index.name = "ENSG"
@@ -226,26 +310,42 @@ def load_reference(args):
     ref_arg = getattr(args, "reference_atlas", None)
     cell_type_col = getattr(args, "cell_type_col", None)
     min_cells = getattr(args, "min_cells", 10)
+    chunk_size = getattr(args, "chunk_size", 20000) or 20000
+    rebuild = getattr(args, "rebuild_reference", False)
+    cache = _cache_dir()
 
     if ref_arg is not None:
         if not os.path.exists(ref_arg):
             raise RuntimeError(f"--reference-atlas not found: {ref_arg}")
         if ref_arg.endswith((".h5ad",)):
-            return _aggregate_h5ad(ref_arg, cell_type_col, min_cells)
+            return _build_or_load_pseudobulk(
+                ref_arg, cache, cell_type_col, min_cells, chunk_size, rebuild)
         return _read_prebuilt_matrix(ref_arg)
-
-    cache = _cache_dir()
-    pseudobulk = os.path.join(cache, "reference_pseudobulk.parquet")
-    if os.path.exists(pseudobulk) and not getattr(args, "rebuild_reference", False):
-        log.info("Loading cached reference: %s", pseudobulk)
-        return _read_prebuilt_matrix(pseudobulk)
 
     url = getattr(args, "atlas_url", None) or DEFAULT_ATLAS_URL
     atlas_path = os.path.join(cache, os.path.basename(url.split("?")[0]))
     if not os.path.exists(atlas_path):
         _download(url, atlas_path)
 
-    ref = _aggregate_h5ad(atlas_path, cell_type_col, min_cells)
+    return _build_or_load_pseudobulk(
+        atlas_path, cache, cell_type_col, min_cells, chunk_size, rebuild)
+
+
+def _build_or_load_pseudobulk(atlas_path, cache, cell_type_col, min_cells,
+                              chunk_size, rebuild):
+    """Aggregate an .h5ad atlas to a pseudobulk matrix, caching the result.
+
+    The cache key includes the atlas filename, the requested cell-type column
+    and min-cells so different atlases / settings don't collide.
+    """
+    key = "%s.ct-%s.min-%d.pseudobulk" % (
+        os.path.basename(atlas_path), cell_type_col or "auto", min_cells)
+    pseudobulk = os.path.join(cache, key + ".parquet")
+    if os.path.exists(pseudobulk) and not rebuild:
+        log.info("Loading cached pseudobulk reference: %s", pseudobulk)
+        return _read_prebuilt_matrix(pseudobulk)
+
+    ref = _aggregate_h5ad(atlas_path, cell_type_col, min_cells, chunk_size)
     try:
         ref.to_parquet(pseudobulk)
         log.info("Cached pseudobulk reference: %s", pseudobulk)
