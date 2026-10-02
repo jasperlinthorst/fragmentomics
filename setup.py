@@ -44,7 +44,10 @@ setup(
     version='0.1',
     packages=find_packages(),
     include_package_data=True,
-    package_data={'cfstats.models': ['*.joblib', '*.pickle', 'LICENSE']},
+    package_data={
+        'cfstats': ['assets/Ensemble_canonical_GRCh38.body.tsv'],
+        'cfstats.models': ['*.joblib', '*.pickle', 'LICENSE'],
+    },
     install_requires=[
         "numpy==2.0.0",
         "scikit-learn==1.7.2",

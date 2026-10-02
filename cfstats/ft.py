@@ -219,7 +219,7 @@ def worker_fourier_transform_samfile(pl):
         leuven = bool(getattr(args, "leuven", False))
         values = {}
 
-        if leuven:
+        if leuven or args.gfffile.lower().endswith(('.tsv', '.txt')):
             regions = _leuven_regions(args.gfffile)
         else:
             db_filename = f'{args.gfffile}.db'

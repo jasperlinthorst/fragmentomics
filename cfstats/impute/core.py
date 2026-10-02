@@ -1123,7 +1123,8 @@ def diploid_emission(emission_is_alt, h_alleles, minp=0.01):
 
 
 def triploid_emission(emission_is_alt, a_other1, a_other2,
-                      w_target, w_other1, w_other2, minp=0.01):
+                      w_target, w_other1, w_other2, minp=0.01,
+                      e_f64=None, out=None):
     """Float64 adjusted emission for the mean-field triploid (NIPT) model.
 
     Three-haplotype analogue of :func:`diploid_emission`.  When updating one
@@ -1152,19 +1153,30 @@ def triploid_emission(emission_is_alt, a_other1, a_other2,
         Contribution weights of the target and the two conditioned haplotypes.
     minp : float
         Emission floor.
+    e_f64 : ndarray (k, n) float64 or None
+        Pre-computed float64 view of ``emission_is_alt``.  When provided the
+        per-call ``astype`` copy is skipped, saving one large allocation.
+    out : ndarray (k, n) float64 or None
+        Pre-allocated output buffer.  When provided the result is written
+        in-place (and also returned), avoiding an extra large allocation.
 
     Returns
     -------
     ndarray (k, n) float64
         Adjusted emission probabilities for the conditioned HMM pass.
     """
-    e = emission_is_alt.astype(np.float64)             # (k, n)
+    e = e_f64 if e_f64 is not None else emission_is_alt.astype(np.float64)  # (k, n)
     a1 = np.asarray(a_other1, dtype=np.float64)        # (n,)
     a2 = np.asarray(a_other2, dtype=np.float64)        # (n,)
     w1 = np.asarray(w_other1, dtype=np.float64)        # scalar or (n,)
     w2 = np.asarray(w_other2, dtype=np.float64)        # scalar or (n,)
     wt = np.asarray(w_target, dtype=np.float64)        # scalar or (n,)
     base = (w1 * a1 + w2 * a2)[np.newaxis, :]          # (1, n)
+    if out is not None:
+        np.multiply(wt, e, out=out)
+        out += base
+        np.clip(out, minp, 1.0 - minp, out=out)
+        return out
     p = wt * e + base                                  # broadcast to (k, n)
     return np.clip(p, minp, 1.0 - minp)
 
@@ -1752,18 +1764,23 @@ def impute_triploid(R, sigma, emission, ff=0.1, nhap=None, n_iter=3,
 
     # --- initial haploid pass (shared posterior; symmetry broken by sampling) ---
     gamma0 = forward_backward_haploid(x_all, sigma, emission, nthreads=nthreads)
-    gammaIMH = gamma0.copy()
-    gammaNIMH = gamma0.copy()
-    gammaIPH = gamma0.copy()
+    gammaIMH = gamma0.astype(np.float32)
+    gammaNIMH = gamma0.astype(np.float32)
+    gammaIPH = gamma0.astype(np.float32)
+    del gamma0
     print("Triploid: initial haploid pass done")
 
     ff_cur = float(np.clip(ff, ff_min, ff_max))
 
     burnin = max(0, n_iter // 3)
-    imh_sum = np.zeros_like(gamma0)
-    nim_sum = np.zeros_like(gamma0)
-    ip_sum = np.zeros_like(gamma0)
+    imh_sum = np.zeros((k, n), dtype=np.float32)
+    nim_sum = np.zeros((k, n), dtype=np.float32)
+    ip_sum = np.zeros((k, n), dtype=np.float32)
     n_avg = 0
+
+    # Pre-allocate reusable buffers to avoid large allocations each iteration
+    _e_f64 = is_alt.astype(np.float64)                 # (k, n) float64, computed once
+    _eff_buf = np.empty((k, n), dtype=np.float64)      # reused output buffer for triploid_emission
 
     for gi in range(n_iter):
         # --- contribution weights (scalar, or per-site under read-prior) ---
@@ -1780,19 +1797,22 @@ def impute_triploid(R, sigma, emission, ff=0.1, nhap=None, n_iter=3,
         # --- mean-field sweep over the three haplotypes ---
         a_nim = sample_haplotype_path(gammaNIMH, emission)
         a_ip = sample_haplotype_path(gammaIPH, emission)
-        eff = triploid_emission(is_alt, a_nim, a_ip, w_im, w_nim, w_ip, minp)
+        triploid_emission(is_alt, a_nim, a_ip, w_im, w_nim, w_ip, minp,
+                          e_f64=_e_f64, out=_eff_buf)
         gammaIMH = forward_backward_haploid_double(
-            x_all, sigma, eff, nthreads=nthreads)
+            x_all, sigma, _eff_buf, nthreads=nthreads).astype(np.float32)
 
         a_im = sample_haplotype_path(gammaIMH, emission)
-        eff = triploid_emission(is_alt, a_im, a_ip, w_nim, w_im, w_ip, minp)
+        triploid_emission(is_alt, a_im, a_ip, w_nim, w_im, w_ip, minp,
+                          e_f64=_e_f64, out=_eff_buf)
         gammaNIMH = forward_backward_haploid_double(
-            x_all, sigma, eff, nthreads=nthreads)
+            x_all, sigma, _eff_buf, nthreads=nthreads).astype(np.float32)
 
         a_nim = sample_haplotype_path(gammaNIMH, emission)
-        eff = triploid_emission(is_alt, a_im, a_nim, w_ip, w_im, w_nim, minp)
+        triploid_emission(is_alt, a_im, a_nim, w_ip, w_im, w_nim, minp,
+                          e_f64=_e_f64, out=_eff_buf)
         gammaIPH = forward_backward_haploid_double(
-            x_all, sigma, eff, nthreads=nthreads)
+            x_all, sigma, _eff_buf, nthreads=nthreads).astype(np.float32)
 
         # --- EM fetal-fraction update ---
         p_im = _hap_marginal_palt(gammaIMH, emission)
@@ -1807,9 +1827,9 @@ def impute_triploid(R, sigma, emission, ff=0.1, nhap=None, n_iter=3,
         if dump_prefix is not None:
             np.savez_compressed(
                 '%s_triploid_iter%d.npz' % (dump_prefix, gi + 1),
-                gammaIMH=gammaIMH.astype(np.float32),
-                gammaNIMH=gammaNIMH.astype(np.float32),
-                gammaIPH=gammaIPH.astype(np.float32),
+                gammaIMH=gammaIMH,
+                gammaNIMH=gammaNIMH,
+                gammaIPH=gammaIPH,
                 emission=emission.astype(np.uint8),
                 sigma=sigma.astype(np.float64),
                 ff=np.float64(ff_new),

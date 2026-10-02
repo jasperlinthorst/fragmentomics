@@ -361,6 +361,19 @@ def _build_or_load_pseudobulk(atlas_path, cache, cell_type_col, min_cells,
 # ---------------------------------------------------------------------------
 
 def _open_gene_db(gfffile):
+    if gfffile.lower().endswith((".tsv", ".txt")):
+        with open(gfffile) as handle:
+            regions = []
+            for line in handle:
+                fields = line.split()
+                if len(fields) != 5:
+                    raise ValueError(
+                        "Gene body annotation must have five columns: "
+                        "gene_id chromosome start end strand")
+                gene_id, chromosome, start, end, strand = fields
+                regions.append((gene_id, chromosome, int(start), int(end), strand))
+        return regions
+
     db_filename = f"{gfffile}.db"
     if not os.path.exists(db_filename):
         log.info("Constructing gene DB (%s)...", db_filename)
@@ -409,30 +422,34 @@ def compute_sample_fftwps(samfile, args, db=None):
     samctgs = set(pysamfile.references)
 
     intensities = {}
-    for gene in db.features_of_type("gene"):
-        gene_id = None
-        if "gene_id" in gene.attributes:
-            gene_id = gene.attributes["gene_id"][0]
-        elif "ID" in gene.attributes:
-            gene_id = gene.attributes["ID"][0]
-        if gene_id is None:
-            continue
+    if isinstance(db, list):
+        regions = db
+    else:
+        def gff_regions():
+            for gene in db.features_of_type("gene"):
+                if "gene_id" in gene.attributes:
+                    gene_id = gene.attributes["gene_id"][0]
+                elif "ID" in gene.attributes:
+                    gene_id = gene.attributes["ID"][0]
+                else:
+                    continue
+                if gene.strand == "-":
+                    start, end = gene.end - window, gene.end
+                else:
+                    start, end = gene.start, gene.start + window
+                yield gene_id, gene.chrom, start, end, gene.strand
+        regions = gff_regions()
+
+    for gene_id, gene_chrom, start, end, strand in regions:
         gene_id = _strip_gene_version(gene_id)
 
         # resolve contig naming (chr prefix mismatch)
-        if gene.chrom in samctgs:
-            chrom = gene.chrom
-        elif "chr" + gene.chrom in samctgs:
-            chrom = "chr" + gene.chrom
+        if gene_chrom in samctgs:
+            chrom = gene_chrom
+        elif "chr" + gene_chrom in samctgs:
+            chrom = "chr" + gene_chrom
         else:
             continue
-
-        if gene.strand == "-":
-            start = gene.end - window
-            end = gene.end
-        else:
-            start = gene.start
-            end = gene.start + window
         if start < 0:
             start = 0
 
