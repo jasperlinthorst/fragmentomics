@@ -136,9 +136,9 @@ def main():
     parser_R206C.add_argument('--hf-token', dest='hf_token', default=None, help='Hugging Face token for remote DNASE1L3 API. When set, uses the remote cfstats-umap-api Space instead of the local model.')
     parser_R206C.set_defaults(func=lazy_cmd('dnase1l3', 'dnase1l3'), requires_licence=True)
 
-    parser_plot = subparsers.add_parser('plot',prog="cfstats R206C", description="Plot points in fragmentome embedding", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
+    parser_plot = subparsers.add_parser('plot',prog="cfstats plot", description="Plot points in fragmentome embedding", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_plot.add_argument("--outfile", dest="outfile", default=None, help="Name of the file to store the plot.")
-    parser_plot.add_argument('--mapping', dest='mapping', default=None, help='Pickled embedding')
+    parser_plot.add_argument('--mapping', dest='mapping', default=get_model_path('UMAP_all_freq.joblib'), help='Joblib/pickled (reducer, xlim, ylim) UMAP mapping')
     parser_plot.add_argument('samfiles', nargs='*', help='sam/bam/cram file')
     parser_plot.set_defaults(func=lazy_cmd('dnase1l3', 'plot_fragmentome'))
 

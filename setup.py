@@ -44,6 +44,7 @@ setup(
     version='0.1',
     packages=find_packages(),
     include_package_data=True,
+    package_data={'cfstats.models': ['*.joblib', '*.pickle', 'LICENSE']},
     install_requires=[
         "numpy==2.0.0",
         "scikit-learn==1.7.2",
@@ -61,6 +62,11 @@ setup(
         "dash==4.0.0",
         "plotly==6.5.2",
         "huggingface_hub>=0.20.0",
+        "h5py>=3.8",
+        "httpx>=0.27",
+        "PyYAML>=6.0",
+        "flask>=3.0",
+        "umap-learn>=0.5.6",
     ],
     ext_modules=[_impute_extension()],
     entry_points={

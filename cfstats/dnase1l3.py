@@ -72,7 +72,12 @@ def plot_fragmentome(args):
         sys.exit(1)
 
     mapping = joblib.load(args.mapping)
-    reducer = mapping[0]
+    if isinstance(mapping, (tuple, list)):
+        reducer = mapping[0]
+        xlim = mapping[1] if len(mapping) > 1 else None
+        ylim = mapping[2] if len(mapping) > 2 else None
+    else:
+        reducer, xlim, ylim = mapping, None, None
     embedding = reducer.embedding_
 
 
@@ -117,6 +122,8 @@ def plot_fragmentome(args):
 
     plt.scatter(embedding[:,0],embedding[:,1],c='blue',s=5,alpha=0.5)
     plt.scatter(fp[:,0],fp[:,1],c='red',s=10,alpha=1)
+    if xlim is not None: plt.xlim(xlim)
+    if ylim is not None: plt.ylim(ylim)
     # plt.show()
     if args.outfile is None:
         if len(args.samfiles)==1:
