@@ -41,26 +41,41 @@ def _next_235_length(length):
 
 def fft_wps_intensity(signal, ampmin=193, ampmax=199, pmin=120, pmax=280,
                       npoints=100, args=None, taper=0.3, pad=0.3):
+    """Return per-period FFT-WPS amplitudes for the configured band.
+
+    The period band is defined by ``--amplitude-min``, ``--amplitude-max`` and
+    ``--amplitude-step`` (read from ``args`` when provided, otherwise from the
+    function defaults).  Callers that need a single scalar should take the
+    mean of the returned list (``np.nanmean``).
+    """
+    # npoints is kept only for backward compatibility with direct callers.
     signal = np.asarray(signal, dtype=float)
+    periods = list(range(
+        int(round(getattr(args, 'ampmin', ampmin))),
+        int(round(getattr(args, 'ampmax', ampmax))) + 1,
+        getattr(args, 'ampstep', 1)))
+    n_periods = len(periods)
+    if not n_periods:
+        return [np.nan]
+
     if not getattr(args, "leuven", False):
         if (signal.size == 0 or np.all(np.isnan(signal))
                 or np.all(signal == signal.flat[0])):
-            return np.nan
+            return [np.nan] * n_periods
         frequencies, power_spectrum = periodogram(
             signal, fs=1, scaling='spectrum')
         if frequencies.size < 2:
-            return np.nan
-        periods = 1 / frequencies[1:]
-        period_mask = (periods >= pmin) & (periods <= pmax)
-        target_periods = periods[period_mask]
+            return [np.nan] * n_periods
+        sample_periods = 1 / frequencies[1:]
+        period_mask = (sample_periods >= pmin) & (sample_periods <= pmax)
+        target_periods = sample_periods[period_mask]
         target_intensity = power_spectrum[1:][period_mask]
         if target_periods.size < 2:
-            return np.nan
+            return [np.nan] * n_periods
         interpolation_function = interp1d(
             target_periods, target_intensity,
             bounds_error=False, fill_value=np.nan)
-        fine_periods = np.linspace(ampmin, ampmax, npoints)
-        return float(np.nanmean(interpolation_function(fine_periods)))
+        return [float(interpolation_function(p)) for p in periods]
 
     recursive_filter = 1 / np.arange(5, 101, 4, dtype=float)
     prefixed = np.concatenate((signal[:300], signal))
@@ -98,8 +113,14 @@ def fft_wps_intensity(signal, ampmin=193, ampmax=199, pmin=120, pmax=280,
     spectrum = periodogram_values[1:n_spectrum + 1]
     spectrum /= 1 - (5 / 8) * taper * 2
     rounded_periods = np.round(1 / frequencies)
-    return [float(spectrum[np.flatnonzero(rounded_periods == period)[0]])
-            for period in (193, 196, 199)]
+    values = []
+    for period in periods:
+        matches = np.flatnonzero(rounded_periods == period)
+        if matches.size == 0:
+            values.append(np.nan)
+        else:
+            values.append(float(spectrum[matches[0]]))
+    return values
 
 
 def wps(bam_file, chromosome, start_query, end_query, k=120, min_len=120,
@@ -260,11 +281,12 @@ def worker_fourier_transform_samfile(pl):
                         continue
                     if strand == '-':
                         signal = signal[::-1]
-                    values[name] = fft_wps_intensity(signal, args=args)
                 else:
-                    values[name] = fft_wps_intensity(
-                        result, ampmin=float(args.ampmin),
-                        ampmax=float(args.ampmax), args=args)
+                    signal = result
+                period_values = fft_wps_intensity(signal, args=args)
+                return_periods = getattr(args, '_return_periods', False)
+                values[name] = (period_values if return_periods
+                                else float(np.nanmean(period_values)))
         finally:
             bam.close()
 
@@ -274,12 +296,42 @@ def worker_fourier_transform_samfile(pl):
         traceback.print_exc()
         raise
 
+def _output_periods(args):
+    return list(range(
+        getattr(args, 'ampmin', 193),
+        getattr(args, 'ampmax', 199) + 1,
+        getattr(args, 'ampstep', 1)))
+
+
+def _choose_output_format(args):
+    leuven = bool(getattr(args, "leuven", False))
+    long_flag = bool(getattr(args, "long_format", False))
+    wide_flag = bool(getattr(args, "wide_format", False))
+    if long_flag and wide_flag:
+        raise ValueError("--long and --wide are mutually exclusive")
+    if leuven:
+        return 'long' if long_flag else ('wide' if wide_flag else 'long')
+    return 'wide' if wide_flag else ('long' if long_flag else 'wide')
+
+
 def fourier_transform_coverage(args):
     logger = log_module.getLogger("cfstats.fourier")
     args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
+    output_format = _choose_output_format(args)
+    args._return_periods = (output_format == 'long')
+
+    if output_format == 'long' and len(args.samfiles) != 1:
+        raise ValueError(
+            "--long requires exactly one BAM/CRAM file; use --wide for multiple samples")
+
     if getattr(args, "leuven", False):
-        if len(args.samfiles) != 1:
-            raise ValueError("--leuven accepts exactly one BAM because stdout is one Leuven FFT table")
+        explicit_options = getattr(args, '_explicit_options', {})
+        if not explicit_options.get('--amplitude-step', False):
+            args.ampstep = 3
+        elif args.ampstep != 3:
+            logger.warning(
+                "--amplitude-step %s overrides the Leuven preset 3",
+                args.ampstep)
         presets = {'-f': ('reqflag', 1), '-F': ('exclflag', 1548),
                    '-q': ('mapqual', 0)}
         explicit = getattr(args, '_explicit_filters', {})
@@ -302,17 +354,39 @@ def fourier_transform_coverage(args):
         results = [worker_fourier_transform_samfile((samfile, args))
                    for samfile in args.samfiles]
 
-    if getattr(args, "leuven", False):
-        sys.stdout.write("#Region\t193\t196\t199\n")
-        for gene, values in results[0]['fft'].items():
+    if output_format == 'long':
+        result = results[0]
+        periods = _output_periods(args)
+        sys.stdout.write("#Region\t" + "\t".join(map(str, periods)) + "\n")
+        for gene, values in result['fft'].items():
             sys.stdout.write(gene + "\t" + "\t".join(map(str, values)) + "\n")
         return
 
-    header_written = False
-    for result in results:
-        fft_values = result['fft']
-        if not header_written:
-            sys.stdout.write("#filename\t" + "\t".join(fft_values) + "\n")
-            header_written = True
-        sys.stdout.write("\t".join(
-            [result['samfile']] + list(map(str, fft_values.values()))) + "\n")
+    # wide format: samples as rows, genes as columns
+    if getattr(args, "leuven", False):
+        all_genes = []
+        seen = set()
+        for r in results:
+            for gene in r['fft'].keys():
+                if gene not in seen:
+                    seen.add(gene)
+                    all_genes.append(gene)
+        if not all_genes:
+            return
+        sys.stdout.write("#filename\t" + "\t".join(all_genes) + "\n")
+        for result in results:
+            fft_values = result['fft']
+            row = [result['samfile']]
+            for gene in all_genes:
+                value = fft_values.get(gene)
+                row.append("nan" if value is None else str(value))
+            sys.stdout.write("\t".join(row) + "\n")
+    else:
+        header_written = False
+        for result in results:
+            fft_values = result['fft']
+            if not header_written:
+                sys.stdout.write("#filename\t" + "\t".join(fft_values) + "\n")
+                header_written = True
+            sys.stdout.write("\t".join(
+                [result['samfile']] + list(map(str, fft_values.values()))) + "\n")

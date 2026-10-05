@@ -64,7 +64,7 @@ def dnase1l3(args, cmdline=True):
         return preds, probs
 
 def plot_fragmentome(args):
-    
+
     from matplotlib import pyplot as plt
 
     if args.mapping is None:
@@ -80,10 +80,9 @@ def plot_fragmentome(args):
         reducer, xlim, ylim = mapping, None, None
     embedding = reducer.embedding_
 
-
     args.k=4
     args.norm='freq'
-    
+
     args.exclflag=3852
     args.mapqual=60
 
@@ -98,22 +97,33 @@ def plot_fragmentome(args):
     args.bamlist=None
 
     Xfszd=np.array(fszd.fszd(args, cmdline=False, ))#.reshape(1,-1)
-    
+
     args.mapqual=60
     args.exclflag=3852
     Xcsm=np.array(csm.cleavesitemotifs(args, cmdline=False, ))#.reshape(1,-1)
-    #print("csm",Xcsm,Xcsm.sum())
 
     Xsem=np.array(fpends._5pends(args, cmdline=False, ))#.reshape(1,-1)
-    #print("sem",Xsem,Xsem.sum())
 
     f=np.concatenate((Xfszd,Xcsm,Xsem),axis=1)
 
-    print("Calculated feature set for cramfiles: ",f.shape)
-    # print(f)
+    log.info("Calculated feature set for %d sample(s): %s", f.shape[0], f.shape)
 
     fp=reducer.transform(f)
-    print(fp)
+
+    # Write per-sample UMAP coordinates to TSV in input order, traceable by filename.
+    coords_path = getattr(args, 'coords', '-')
+    columns = ['x', 'y']
+    if getattr(args, 'name', True):
+        columns = ['filename'] + columns
+    df = pd.DataFrame(fp, columns=['x', 'y'])
+    df['filename'] = args.samfiles
+    df = df[columns]
+
+    if coords_path is None or coords_path == '-':
+        df.to_csv(sys.stdout, sep='\t', index=False, header=getattr(args, 'header', False))
+    else:
+        df.to_csv(coords_path, sep='\t', index=False, header=getattr(args, 'header', False))
+        log.info("Wrote UMAP coordinates to %s", coords_path)
 
     #import matplotlib.image as mpimg
     #img=mpimg.imread("UMAP_background_scatter.png")
@@ -132,6 +142,6 @@ def plot_fragmentome(args):
             import uuid
             args.outfile=uuid.uuid4().hex[:8]+".fragmentome.png"
 
-    sys.stderr.write(f"Writing fragmentome plot to: {args.outfile}")
+    sys.stderr.write(f"Writing fragmentome plot to: {args.outfile}\n")
     plt.savefig(args.outfile)
     plt.close()

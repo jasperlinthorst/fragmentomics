@@ -454,7 +454,8 @@ def compute_sample_fftwps(samfile, args, db=None):
             start = 0
 
         signal = wps(pysamfile, chrom, start, end)
-        intensity = fft_wps_intensity(signal, ampmin=ampmin, ampmax=ampmax)
+        intensity = float(np.nanmean(fft_wps_intensity(
+            signal, ampmin=ampmin, ampmax=ampmax)))
         if not np.isnan(intensity):
             # average duplicate gene ids
             if gene_id in intensities:

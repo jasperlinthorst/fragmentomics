@@ -141,21 +141,25 @@ def main():
 
     parser_plot = subparsers.add_parser('plot',prog="cfstats plot", description="Plot points in fragmentome embedding", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_plot.add_argument("--outfile", dest="outfile", default=None, help="Name of the file to store the plot.")
+    parser_plot.add_argument("--coords", "-c", dest="coords", default="-", help="Path to write the per-sample UMAP coordinates as a tab-separated file. Use '-' for stdout.")
     parser_plot.add_argument('--mapping', dest='mapping', default=get_model_path('UMAP_all_freq.joblib'), help='Joblib/pickled (reducer, xlim, ylim) UMAP mapping')
     parser_plot.add_argument('samfiles', nargs='*', help='sam/bam/cram file')
     parser_plot.set_defaults(func=lazy_cmd('dnase1l3', 'plot_fragmentome'))
 
     parser_fourier = subparsers.add_parser('fourier', prog="cfstats fourier", description="Extract Fourier transformed coverage profile for each gene", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
-    parser_fourier.add_argument('samfiles', nargs='+', help='sam/bam/cram file')
+    parser_fourier.add_argument('samfiles', nargs='*', help='sam/bam/cram file')
     parser_fourier.add_argument('--genemodel', dest='gfffile', default=DEFAULT_GENE_MODEL, help='Gene annotation (GFF/GTF or five-column gene body TSV)')
     parser_fourier.add_argument('-w', dest='window', default=10000, help='Size of the gene body which whould be transformed')
-    parser_fourier.add_argument('--amplitude-min', dest='ampmin', default=193, help='Amplitude range over which mean is calculated')
-    parser_fourier.add_argument('--amplitude-max', dest='ampmax', default=199, help='Amplitude range over which mean is calculated')
-    parser_fourier.add_argument('--leuven', dest='leuven', action='store_true', default=False, help='Use Leuven read selection, WPS scoring, strand orientation, and spectral transform. Writes the three-column Leuven FFT table to stdout and requires the five-column Ensemble_canonical_GRCh38.body.tsv annotation.')
+    parser_fourier.add_argument('--amplitude-min', dest='ampmin', default=193, type=int, help='Lower bound (bp) of the nucleosome-spacing period band.')
+    parser_fourier.add_argument('--amplitude-max', dest='ampmax', default=199, type=int, help='Upper bound (bp) of the nucleosome-spacing period band.')
+    parser_fourier.add_argument('--amplitude-step', dest='ampstep', default=1, type=int, help='Step size (bp) between discrete period amplitudes. With --leuven the preset is 3 unless explicitly overridden.')
+    parser_fourier.add_argument('--leuven', dest='leuven', action='store_true', default=False, help='Use Leuven read selection, WPS scoring, strand orientation, and spectral transform. By default writes the long-format Leuven FFT table for backward compatibility with the Kate pipeline; use --wide for the cfstats-style sample x gene matrix.')
+    parser_fourier.add_argument('--long', dest='long_format', action='store_true', default=False, help='Long output: gene rows, period columns. Requires a single input sample. This is the default when --leuven is used.')
+    parser_fourier.add_argument('--wide', dest='wide_format', action='store_true', default=False, help='Wide output: sample rows, gene columns. This is the default for standard cfstats output and allows multiple samples via --bamlist.')
     parser_fourier.set_defaults(func=lazy_cmd('ft', 'fourier_transform_coverage'))
 
     parser_deconv = subparsers.add_parser('deconv', prog="cfstats deconv", description="Deconvolute fractional cell-type contributions of cfDNA from per-gene FFT-WPS profiles using a single-cell transcriptomic reference atlas (downloaded/cached under the hood).", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
-    parser_deconv.add_argument('samfiles', nargs='+', help='sam/bam/cram file(s) to deconvolve.')
+    parser_deconv.add_argument('samfiles', nargs='*', help='sam/bam/cram file(s) to deconvolve.')
     parser_deconv.add_argument('--genemodel', dest='gfffile', default=DEFAULT_GENE_MODEL, help='Gene annotation (GFF/GTF or five-column gene body TSV; gene ids should be ENSG)')
     parser_deconv.add_argument('-w', dest='window', default=10000, type=int, help='Size of the gene body window that is Fourier transformed.')
     parser_deconv.add_argument('--amplitude-min', dest='ampmin', default=193, type=float, help='Lower bound (bp) of the nucleosome-spacing period band.')
@@ -301,6 +305,11 @@ def main():
                   (token.startswith(flag) and len(token) > len(flag))
                   for token in cli_tokens)
         for flag in ('-f', '-F', '-q')
+    }
+    args._explicit_options = {
+        opt: any(token == opt or token.startswith(opt + '=')
+                  for token in cli_tokens)
+        for opt in ('--amplitude-step',)
     }
 
     if hasattr(args, 'func'):

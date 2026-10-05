@@ -15,11 +15,11 @@ import pytest
 class TestFftWpsIntensity:
     def test_flat_signal_returns_nan(self):
         from cfstats.ft import fft_wps_intensity
-        assert np.isnan(fft_wps_intensity(np.ones(2000)))
+        assert np.isnan(np.nanmean(fft_wps_intensity(np.ones(2000))))
 
     def test_empty_signal_returns_nan(self):
         from cfstats.ft import fft_wps_intensity
-        assert np.isnan(fft_wps_intensity(np.array([])))
+        assert np.isnan(np.nanmean(fft_wps_intensity(np.array([]))))
 
     def test_periodic_signal_returns_finite(self):
         from cfstats.ft import fft_wps_intensity
@@ -27,7 +27,7 @@ class TestFftWpsIntensity:
         # the 193-199 bp band
         x = np.arange(4000)
         signal = np.sin(2 * np.pi * x / 196.0)
-        val = fft_wps_intensity(signal, ampmin=193, ampmax=199)
+        val = np.nanmean(fft_wps_intensity(signal, ampmin=193, ampmax=199))
         assert np.isfinite(val)
         assert val > 0
 

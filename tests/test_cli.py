@@ -2,6 +2,7 @@
 
 import pickle
 import sys
+import os
 import argparse
 from io import StringIO
 from unittest import mock
@@ -81,6 +82,34 @@ class TestArgParsing:
     def test_dnase1l3_missing_args_exits_2(self):
         code = self._parse(["dnase1l3"])
         assert code == 2
+
+    @pytest.mark.parametrize("command", ["fourier", "deconv"])
+    def test_gene_commands_accept_bamlist_without_positional_files(self, command):
+        from cfstats.__main__ import lazy_cmd, main
+        old_argv = sys.argv
+        try:
+            sys.argv = ["cfstats", command, "--bamlist", "samples.txt"]
+            with mock.patch.object(lazy_cmd, "__call__") as call:
+                main()
+            args = call.call_args.args[0]
+            assert args.samfiles == []
+            assert args.bamlist == "samples.txt"
+        finally:
+            sys.argv = old_argv
+
+    @pytest.mark.parametrize("command", ["fourier", "deconv"])
+    def test_gene_commands_default_to_packaged_model(self, command):
+        from cfstats.__main__ import DEFAULT_GENE_MODEL, lazy_cmd, main
+        old_argv = sys.argv
+        try:
+            sys.argv = ["cfstats", command, "sample.bam"]
+            with mock.patch.object(lazy_cmd, "__call__") as call:
+                main()
+            args = call.call_args.args[0]
+            assert args.gfffile == DEFAULT_GENE_MODEL
+            assert os.path.isfile(args.gfffile)
+        finally:
+            sys.argv = old_argv
 
 
 # ---------------------------------------------------------------------------
