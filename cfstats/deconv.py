@@ -25,6 +25,7 @@ import logging
 import os
 import sys
 import urllib.request
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -454,8 +455,11 @@ def compute_sample_fftwps(samfile, args, db=None):
             start = 0
 
         signal = wps(pysamfile, chrom, start, end)
-        intensity = float(np.nanmean(fft_wps_intensity(
-            signal, ampmin=ampmin, ampmax=ampmax)))
+        period_values = fft_wps_intensity(
+            signal, ampmin=ampmin, ampmax=ampmax)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            intensity = float(np.nanmean(period_values))
         if not np.isnan(intensity):
             # average duplicate gene ids
             if gene_id in intensities:

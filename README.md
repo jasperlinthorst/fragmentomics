@@ -3,9 +3,10 @@
 A command-line toolkit for extracting fragmentomic features from cell-free DNA
 sequencing data (BAM/CRAM). It provides subcommands for fragment size
 distributions, cleavage-site motifs, 5′-end sequence patterns, genome-wide bin
-counts, nucleosome positioning, and more. Pre-trained models for DNASE1L3
-activity prediction, fetal-fraction estimation and UMAP-based fragmentome
-embedding are available separately (see [Models](#models) below).
+counts, nucleosome positioning, cell-type deconvolution, genotype imputation,
+and more. Pre-trained models for DNASE1L3 activity prediction, fetal-fraction
+estimation and UMAP-based fragmentome embedding are available separately (see
+[Models](#models) below).
 
 ## Installation
 
@@ -39,6 +40,12 @@ cfstats 5pends -r hg38.fa sample.cram
 # Genome-wide bin counts (1 Mb bins)
 cfstats bincounts -r hg38.fa -b 1000000 sample.cram
 
+# Fourier-transformed coverage (Leuven pipeline)
+cfstats fourier --leuven -r hg38.fa genes.tsv sample.cram
+
+# Cell-type deconvolution from FFT-WPS profiles
+cfstats deconv -r hg38.fa --nproc 4 sample.cram
+
 # DNASE1L3 prediction via remote API
 cfstats dnase1l3 --hf-token $HF_TOKEN -r hg38.fa sample.cram
 
@@ -65,6 +72,8 @@ These flags apply to all subcommands:
 | `--nproc` | Parallel processes | 1 |
 | `--header` | Print a header line with feature names | off |
 | `--noname` | Omit sample name prefix | off |
+| `--min-base-quality` | Minimum base quality for SNP-related read filtering | 17 |
+| `--bamlist` | File with one BAM/CRAM path per line | — |
 | `--seed` | Random seed | 42 |
 | `--loglevel` | Logging verbosity | WARNING |
 
@@ -85,7 +94,6 @@ cfstats fszd --bamlist samples.txt -r hg38.fa --nproc 4
 | `-l, --lower` | Minimum fragment length | 60 |
 | `-u, --upper` | Maximum fragment length | 1000 |
 | `--noinsert` | Infer size from sequence (long-read / unpaired) | off |
-| `--bamlist` | File with one BAM/CRAM path per line | — |
 
 ### `csm` — Cleavage-site motifs
 
@@ -110,7 +118,7 @@ Same as `csm`, but stratified by fragment size.
 cfstats csmbsz -r hg38.fa -l 60 -u 600 sample.cram
 ```
 
-Additional flags: `-l`, `-u`, `--noinsert` (see `fszd`).
+Additional flags: `-k`, `--pp`, `-l`, `-u`, `--noinsert` (see `csm` / `fszd`).
 
 ### `5pends` — 5′-end sequence patterns
 
@@ -135,6 +143,8 @@ Same as `5pends`, but stratified by fragment size.
 cfstats 5pendsbsz -r hg38.fa -l 60 -u 600 sample.cram
 ```
 
+Additional flags: `-k`, `--useref`, `--uselexsmallest`, `--pp`, `-l`, `-u`, `--noinsert`.
+
 ### `bincounts` — Genome-wide bin counts
 
 Count reads in fixed-size genomic bins.
@@ -150,7 +160,6 @@ cfstats bincounts -r hg38.fa --bamlist samples.txt --nproc 8
 | `-b, --binsize` | Bin size (bp) | 1 000 000 |
 | `--gccorrect` | Apply GC-content correction | off |
 | `--frac` | LOESS smoothing fraction for GC correction | 0.5 |
-| `--bamlist` | File with one BAM/CRAM path per line | — |
 
 ### `delfi` — DELFI-like fragmentation measure
 
@@ -165,6 +174,7 @@ cfstats delfi -r hg38.fa -b 1000000 sample.cram
 |------|-------------|---------|
 | `--short-lower / --short-upper` | Short fragment range | 100–150 |
 | `--long-lower / --long-upper` | Long fragment range | 150–200 |
+| `--noinsert` | Infer size from sequence (long-read / unpaired) | off |
 
 ### `dnase1l3` — DNASE1L3 activity prediction
 
@@ -222,8 +232,61 @@ Extract Fourier-transformed coverage across gene bodies
 ([Snyder *et al.*, Cell 2016](https://doi.org/10.1016/j.cell.2015.11.050)).
 
 ```bash
-cfstats fourier -r hg38.fa genes.gff sample.cram
+# Default mode (wide output: samples as rows, genes as columns)
+cfstats fourier -r hg38.fa --genemodel genes.gff sample1.cram sample2.cram
+
+# Leuven-compatible output (long: genes as rows, discrete period amplitudes as columns; single sample)
+cfstats fourier --leuven -r hg38.fa --genemodel Ensemble_canonical_GRCh38.body.tsv sample.cram
+
+# Leuven processing in wide format, allowing multiple samples / --bamlist
+cfstats fourier --leuven --wide --nproc 4 --bamlist bamlist.txt \
+    -r hg38.fa --genemodel Ensemble_canonical_GRCh38.body.tsv
 ```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--genemodel` | Gene annotation (GFF/GTF or five-column gene body TSV) | bundled |
+| `-w` | Gene body window size to transform (bp) | 10000 |
+| `--amplitude-min` | Lower bound of period band (bp) | 193 |
+| `--amplitude-max` | Upper bound of period band (bp) | 199 |
+| `--amplitude-step` | Step between discrete period amplitudes in `--leuven` mode (bp) | 3 |
+| `--leuven` | Use Leuven read selection, WPS scoring and spectral transform | off |
+| `--long` | Long output: gene rows, period columns; requires one sample | `--leuven` default |
+| `--wide` | Wide output: sample rows, gene columns; allows multiple samples | default otherwise |
+
+### `deconv` — Cell-type deconvolution
+
+Deconvolute fractional cell-type contributions from per-gene FFT-WPS profiles
+using a single-cell transcriptomic reference atlas (downloaded/cached under the
+hood, or supplied locally).
+
+```bash
+# Use the default Tabula Sapiens atlas (downloaded on first run)
+cfstats deconv -r hg38.fa sample.cram
+
+# Local pre-built reference matrix (genes × cell types)
+cfstats deconv -r hg38.fa --reference-atlas ref.parquet sample.cram
+
+# Bootstrap uncertainties (writes sample.bootstrap_std.tsv)
+cfstats deconv -r hg38.fa --bootstrap 100 --output sample_deconv.tsv sample.cram
+```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--genemodel` | Gene annotation (GFF/GTF or five-column gene body TSV; gene ids should be ENSG) | bundled |
+| `-w` | Gene body window for FFT-WPS (bp) | 10000 |
+| `--amplitude-min` | Lower bound of nucleosome-spacing period band (bp) | 193 |
+| `--amplitude-max` | Upper bound of nucleosome-spacing period band (bp) | 199 |
+| `--reference-atlas` | Local `.h5ad` atlas or genes × cell-types matrix (.parquet/.tsv/.csv) | — |
+| `--atlas-url` | URL to download a single-cell atlas `.h5ad` | Tabula Sapiens |
+| `--cell-type-col` | `.obs` column holding cell-type labels | auto-detected |
+| `--min-cells` | Minimum cells for a cell type to be included | 10 |
+| `--chunk-size` | Cells per chunk when streaming a large `.h5ad` | 20000 |
+| `--rebuild-reference` | Force rebuilding the cached pseudobulk reference | off |
+| `--no-standardize` | Do not z-score signal/reference columns before NNLS | off |
+| `--relationship` | FFT-WPS vs expression relationship: `auto`, `negative`, `positive` | auto |
+| `--bootstrap` | Gene-level bootstrap iterations for uncertainty | 0 |
+| `--output`, `-O` | Output TSV path (`-` for stdout) | `-` |
 
 ### `nucs` — Nucleosome calling from WPS
 
@@ -243,13 +306,139 @@ cfstats nucs -r hg38.fa --chrom chr22 --start 0 --end 50000000 sample.cram
 | `--min-prominence` | Peak prominence threshold | 5.0 |
 | `--min-distance` | Minimum inter-nucleosome distance | 147 |
 
+### `gcbias` — Per-sample GC-bias correction table
+
+Estimate a Griffin-style GC-bias correction table (`length × num_GC`) for use by
+`siteprofile`. Run once per sample.
+
+```bash
+cfstats gcbias -r hg38.fa sample.cram
+cfstats gcbias -r hg38.fa --size-range 100 200 --out-dir gc_tables/ *.bam
+```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--size-range` | Fragment length range to model (two integers) | 100 200 |
+| `--gc-samples` | Random genomic windows used to estimate expected GC frequency | 200000 |
+| `--chroms` | Chromosomes sampled for expected GC frequency | chr1–chr22 |
+| `--out-dir` | Output directory for per-sample `<sample>.GC_bias.txt` files | `.` |
+
+### `siteprofile` — Composite nucleosome coverage around sites
+
+Compute Griffin-style composite GC-corrected nucleosome coverage profiles and
+features (`mean_coverage`, `central_coverage`, `amplitude`) around a list of
+sites. Sites can be provided as a Griffin-style YAML or a BED file.
+
+```bash
+# Uncorrected profile
+cfstats siteprofile -r hg38.fa sites.bed sample.cram
+
+# GC-corrected profile (run cfstats gcbias first)
+cfstats siteprofile -r hg38.fa --gc-bias sample.GC_bias.txt sites.yaml sample.cram
+
+# Save full binned profiles to a directory
+cfstats siteprofile -r hg38.fa --gc-bias sample.GC_bias.txt \
+    --save-window -1000 1000 --save-profile profiles/ sites.bed sample.cram
+```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--gc-bias` | GC-bias table from `cfstats gcbias` | — |
+| `--size-range` | Fragment length range to include | 100 200 |
+| `--norm-window` | Window around each site used for profile normalisation | -5000 5000 |
+| `--save-window` | Window used for `mean_coverage` / `amplitude` features | -1000 1000 |
+| `--center-window` | Window used for the `central_coverage` feature | -30 30 |
+| `--step` | Bin size (bp) for the composite profile | 15 |
+| `--fft-index` | FFT component index used for the `amplitude` feature | 10 |
+| `--smoothing-length` | Savitzky–Golay smoothing window (bp) | 165 |
+| `--no-smoothing` | Disable Savitzky–Golay smoothing | off |
+| `--chroms` | Restrict sites to these chromosomes | all |
+| `--chrom-column` | Chromosome column name (YAML/tsv site lists) | Chrom |
+| `--position-column` | Position column name (YAML/tsv site lists) | position |
+| `--strand-column` | Strand column name (YAML/tsv site lists) | Strand |
+| `--save-profile` | Directory to write full binned profiles | — |
+
+### `imputeref` — Build reference panel and train HMM
+
+Build a reference panel from BAM/VCF files and train an HMM imputation model in
+one step. The output is a trained model VCF that can be passed to `cfstats impute`.
+
+```bash
+cfstats imputeref targets.vcf.gz -r hg38.fa cohort1.bam cohort2.bam -k 4 --outputprefix myref
+```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-k` | Number of HMM states | 4 |
+| `--maxiter` | EM iterations | 40 |
+| `--warm-start` | Warm-start from a previously trained model VCF | — |
+| `--maxvar` | Maximum number of variants to consider | 10 000 000 |
+| `--region` | Restrict to region | — |
+| `--outputprefix` | Output file prefix | auto |
+| `--addchr` | Prefix `chr` to contig names | off |
+| `--rmchr` | Strip `chr` prefix from contig names | off |
+| `--filterflag` | Alignments to exclude (samtools `-F`) | 3840 |
+| `--cram-reference` | Reference FASTA for CRAM decoding | — |
+| `--ngen` | Generations since founding | 100 |
+
+### `impute` — Genotype imputation from BAM/CRAM
+
+Impute genotypes from an alignment file using a phased population reference
+panel (standard hap/legend files, a VCF/BCF, or a trained model VCF from
+`cfstats imputeref`). Supports diploid samples and triploid (NIPT/maternal
+plasma) samples via `--ff` or `--read-prior`.
+
+```bash
+# Diploid imputation
+cfstats impute refpanel.vcf.gz sample.cram chr20 --impute-output sample.vcf.gz
+
+# NIPT/triploid with global fetal fraction prior
+cfstats impute model.vcf.gz maternal.cram chr13 --ff 0.10 --impute-output nipt.vcf.gz
+
+# NIPT with per-read fetal posteriors from a SAM tag (e.g. XF)
+cfstats impute model.vcf.gz maternal.cram chr21 --read-prior --impute-output nipt.vcf.gz
+```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--start / --stop` | Start/end positions (VCF reference only) | — |
+| `--impute-output` | Output (bgzipped) VCF (`-` for stdout) | `-` |
+| `--sample` | Sample name in output VCF | input basename |
+| `--addchr` | Prefix `chr` to input contig names | off |
+| `--rmchr` | Strip `chr` prefix from input contig names | off |
+| `--cram-reference` | Reference FASTA for CRAM decoding | — |
+| `--ngen` | Generations since founding the reference population | 100 |
+| `--avgr` | Average recombination rate (cM/Mb) | 1 |
+| `--minp` | Minimum probability (prevents underflow) | 1e-3 |
+| `--ff` | Expected fetal fraction; enables triploid (NIPT) model | — |
+| `--read-prior` | Use per-read fetal priors from a SAM tag | off |
+| `--read-prior-tag` | SAM tag holding Phred-encoded fetal posteriors | XF |
+| `--nhap` | Pre-select best-matching N haplotypes | all |
+| `--random-init` | Random haplotype init + iterative re-selection | off |
+| `--gibbs` | Diploid: use Gibbs sampling on read labels | off |
+| `--knew` | New haplotypes added per iteration with `--random-init` | `nhap` |
+| `--fulliter` | Diploid mean-field / triploid full-panel iterations | 3 |
+| `--partiter` | Max label-reassignment iterations (triploid) | until convergence |
+| `--maxnreads` | Limit total reads considered | — |
+| `--nthreads` | OpenMP threads / per-label pool size (default: `--nproc`) | — |
+| `--genetic-map` | PLINK-format genetic map (overrides uniform `--avgr`) | — |
+| `--nophase` | Disable final phasing iteration | off |
+| `--dump` | Dump gamma/emission/sigma/hap-path matrices per iteration | — |
+
 ### `plot` — Plot fragmentome embedding
 
 Plot samples in the UMAP fragmentome embedding space.
 
 ```bash
 cfstats plot --mapping umap_model.pkl -r hg38.fa sample.cram
+cfstats plot --mapping umap_model.pkl -r hg38.fa --outfile embedding.png sample.cram
 ```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--mapping` | Pickled `(reducer, xlim, ylim)` UMAP mapping | bundled |
+| `--outfile` | File to save the plot | — |
+| `--coords`, `-c` | File to save per-sample UMAP coordinates (`filename`, `x`, `y`); use `-` for stdout | `-` |
 
 ### `fragmentome` — Interactive fragmentome explorer
 
@@ -260,6 +449,14 @@ database stored in ClickHouse.
 cfstats fragmentome --ch-host localhost --ch-port 8123
 cfstats fragmentome --hf-token $HF_TOKEN   # use remote UMAP API for uploads
 ```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--mapping` | Pickled UMAP mapping for upload-to-embedding | — |
+| `--hf-token` | HF token for remote UMAP API | — |
+| `--ch-host` | ClickHouse server host | localhost |
+| `--ch-port` | ClickHouse HTTP port | 8123 |
+| `--admin-password` | Password for the `/admin` upload page | env var |
 
 ## Models
 
@@ -312,6 +509,16 @@ cfstats 5pends --norm freq -r hg38.fa sample.cram > sample.5pends.tsv
 
 # Bin counts (50 kb bins, for fetal fraction)
 cfstats bincounts -r hg38.fa -b 50000 -q 1 -F 1024 sample.cram > sample.bincounts.tsv
+
+# Fourier coverage / Leuven WPS profile
+cfstats fourier --leuven -r hg38.fa sample.cram > sample.fourier.tsv
+
+# Cell-type deconvolution
+cfstats deconv -r hg38.fa --output sample.deconv.tsv sample.cram
+
+# GC-corrected site profile (run gcbias first)
+cfstats gcbias -r hg38.fa sample.cram
+cfstats siteprofile -r hg38.fa --gc-bias sample.GC_bias.txt sites.bed sample.cram > sample.siteprofile.tsv
 ```
 
 ### Batch processing
@@ -348,13 +555,24 @@ cfstats/
 ├── ff.py              # Fetal fraction estimation
 ├── nipt.py            # NIPT aneuploidy screening
 ├── ft.py              # Fourier-transformed coverage
+├── deconv.py          # Cell-type deconvolution from FFT-WPS
 ├── nucs.py            # Nucleosome calling (WPS)
+├── gcbias.py          # Per-sample GC-bias correction tables
+├── siteprofile.py     # Composite nucleosome site profiles
+├── sites.py           # Site-list loading helpers
 ├── fragmentome.py     # Interactive Dash explorer
 ├── db.py              # ClickHouse database layer
 ├── utils.py           # Shared utilities
-└── models/
-    ├── __init__.py    # Model loading + remote API helpers
-    └── LICENSE        # Research-only model licence
+├── models/            # Model loading + remote API helpers
+│   ├── __init__.py
+│   ├── *.joblib / *.pickle
+│   └── LICENSE
+├── assets/            # Bundled gene models / static files
+└── impute/            # Genotype imputation HMM
+    ├── __init__.py
+    ├── cli.py
+    ├── core.py
+    └── _hmm.c
 ```
 
 ## License

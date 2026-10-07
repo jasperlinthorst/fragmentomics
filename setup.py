@@ -42,12 +42,13 @@ def _impute_extension():
 setup(
     name='cfstats', author="Jasper Linthorst", author_email="jasper.linthorst@gmail.com",
     version='0.1',
-    packages=find_packages(),
-    include_package_data=True,
+    packages=find_packages(exclude=('tests', 'tests.*')),
+    include_package_data=False,
     package_data={
         'cfstats': ['assets/Ensemble_canonical_GRCh38.body.tsv'],
-        'cfstats.models': ['*.joblib', '*.pickle', 'LICENSE'],
+        'cfstats.models': ['LICENSE'],
     },
+    exclude_package_data={'cfstats.models': ['*.joblib', '*.pickle']},
     install_requires=[
         "numpy==2.0.0",
         "scikit-learn==1.7.2",
@@ -57,6 +58,7 @@ setup(
         "seaborn==0.13.2",
         "scipy==1.17.1",
         "pysam==0.23.3",
+        "pyarrow>=10.0.1",
         "joblib==1.5.3",
         "gffutils==0.13",
         "python-glmnet>=2.6.1",
@@ -71,7 +73,7 @@ setup(
         "flask>=3.0",
         "umap-learn>=0.5.6",
     ],
-    ext_modules=[_impute_extension()],
+    ext_modules=[] if os.environ.get('CFSTATS_NO_EXT') == '1' else [_impute_extension()],
     entry_points={
         'console_scripts': [
             'cfstats=cfstats.__main__:main',
