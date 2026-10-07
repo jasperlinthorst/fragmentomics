@@ -53,7 +53,7 @@ def fft_wps_intensity(signal, ampmin=193, ampmax=199, pmin=120, pmax=280,
     periods = list(range(
         int(round(getattr(args, 'ampmin', ampmin))),
         int(round(getattr(args, 'ampmax', ampmax))) + 1,
-        getattr(args, 'ampstep', 1)))
+        getattr(args, 'ampstep', 1) or 1))
     n_periods = len(periods)
     if not n_periods:
         return [np.nan]

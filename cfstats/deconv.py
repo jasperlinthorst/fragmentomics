@@ -288,7 +288,7 @@ def _aggregate_h5ad(h5ad_path, cell_type_col=None, min_cells=10, chunk_size=2000
 def _read_prebuilt_matrix(path):
     if path.endswith((".parquet", ".pq")):
         ref = pd.read_parquet(path)
-    elif path.endswith((".tsv", ".txt", ".tsv.gz")):
+    elif path.endswith((".tsv", ".txt", ".tsv.gz", ".txt.gz")):
         ref = pd.read_csv(path, sep="\t", index_col=0)
     elif path.endswith((".csv", ".csv.gz")):
         ref = pd.read_csv(path, index_col=0)
@@ -419,6 +419,7 @@ def compute_sample_fftwps(samfile, args, db=None):
                 "Index it first (e.g. 'samtools index')."
             )
 
+    leuven = bool(getattr(args, "leuven", False))
     pysamfile = pysam.AlignmentFile(samfile, "rb", reference_filename=reference)
     samctgs = set(pysamfile.references)
 
@@ -454,9 +455,17 @@ def compute_sample_fftwps(samfile, args, db=None):
         if start < 0:
             start = 0
 
-        signal = wps(pysamfile, chrom, start, end)
+        result = wps(pysamfile, chrom, start, end, args=args)
+        if leuven:
+            signal, covered = result
+            if not covered:
+                continue
+            if strand == "-":
+                signal = signal[::-1]
+        else:
+            signal = result
         period_values = fft_wps_intensity(
-            signal, ampmin=ampmin, ampmax=ampmax)
+            signal, ampmin=ampmin, ampmax=ampmax, args=args)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
             intensity = float(np.nanmean(period_values))
@@ -609,6 +618,81 @@ def deconvolve(signal, ref, standardize=True, relationship="auto", n_bootstrap=0
     return fractions, residual, bootstrap_std
 
 
+def rank_correlate(signal, ref):
+    """Rank cell types by Pearson correlation of per-gene FFT-WPS vs expression.
+
+    Replicates the Leuven/Kate ``cellforigin_correlations.R`` approach: the
+    sample's per-gene mean FFT intensity (193/196/199 bp band) is Pearson-
+    correlated against each column of the reference expression matrix using
+    only genes observed in both (equivalent to R's
+    ``use="pairwise.complete.obs"``), then cell types are ranked in ascending
+    order of correlation. Rank 1 is the *lowest* (most negative) correlation,
+    which corresponds to the strongest contribution, since FFT-WPS intensity
+    decreases with expression.
+
+    Args:
+        signal (pd.Series): per-gene FFT-WPS intensity, indexed by ENSG.
+        ref (pd.DataFrame): genes (ENSG, index) x cell-types (columns).
+
+    Returns:
+        tuple: (ranks, correlations) - both pd.Series indexed by cell type.
+            ``ranks`` are 1..n_types (ascending correlation, NaN columns last);
+            ``correlations`` are the raw Pearson coefficients (NaN for columns
+            with fewer than 3 shared genes or zero variance).
+    """
+    common = ref.index.intersection(signal.dropna().index)
+    if len(common) < 10:
+        raise RuntimeError(
+            f"Only {len(common)} genes shared between sample and reference; "
+            "cannot rank cell types. Check that the GFF gene ids are ENSG."
+        )
+
+    f = signal.loc[common].astype(float)
+    R = ref.loc[common].astype(float)
+
+    corr = {}
+    for col in R.columns:
+        mask = f.notna() & R[col].notna()
+        if mask.sum() < 3:
+            corr[col] = np.nan
+            continue
+        c = np.corrcoef(f[mask], R[col][mask])
+        corr[col] = c[0, 1]
+    correlations = pd.Series(corr, name=signal.name)
+
+    # ascending order, ties broken by column order (like R's order+seq rank)
+    order = correlations.sort_values(kind="mergesort").index
+    ranks = pd.Series(
+        {name: i + 1 for i, name in enumerate(order)}, name=signal.name)
+    return ranks, correlations
+
+
+def _apply_leuven_presets(args, logger):
+    """Set the Leuven read-selection / amplitude-step presets on deconv args.
+
+    Mirrors the preset block in ``cfstats.ft.fourier_transform_coverage`` so
+    the FFT-WPS signal matches the Kate pipeline.
+    """
+    args.leuven = True
+    explicit_options = getattr(args, "_explicit_options", {})
+    if not explicit_options.get("--amplitude-step", False):
+        args.ampstep = 3
+    elif args.ampstep != 3:
+        logger.warning(
+            "--amplitude-step %s overrides the Leuven preset 3", args.ampstep)
+    presets = {"-f": ("reqflag", 1), "-F": ("exclflag", 1548),
+               "-q": ("mapqual", 0)}
+    explicit = getattr(args, "_explicit_filters", {})
+    for flag, (attribute, preset) in presets.items():
+        if explicit.get(flag, False):
+            value = getattr(args, attribute)
+            if value != preset:
+                logger.warning(
+                    "%s %s overrides the Leuven preset %s", flag, value, preset)
+        else:
+            setattr(args, attribute, preset)
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
@@ -622,6 +706,13 @@ def deconv(args):
     and columns are cell types.
     """
     args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
+
+    rankcorr = bool(getattr(args, "rankcorr", False))
+    if rankcorr or getattr(args, "leuven", False):
+        # rankcorr replicates the Kate pipeline, which uses Leuven read
+        # selection, WPS scoring, strand orientation and the 193/196/199 bp
+        # spectral band (amplitude step 3).
+        _apply_leuven_presets(args, log)
 
     ref = load_reference(args)
 
@@ -645,9 +736,15 @@ def deconv(args):
     rows = {}
     residuals = {}
     boot_stds = {}
+    corr_rows = {}
     for samfile in args.samfiles:
         sig = signals[samfile]
         try:
+            if rankcorr:
+                ranks, correlations = rank_correlate(sig, ref)
+                rows[samfile] = ranks
+                corr_rows[samfile] = correlations
+                continue
             fractions, residual, bootstrap_std = deconvolve(
                 sig, ref,
                 standardize=not args.no_standardize,
@@ -668,7 +765,8 @@ def deconv(args):
     result = pd.DataFrame(rows).T
     result.index.name = "sample"
     result = result.sort_index(axis=1)
-    result.insert(0, "fit_residual", pd.Series(residuals))
+    if not rankcorr:
+        result.insert(0, "fit_residual", pd.Series(residuals))
 
     out = getattr(args, "output", "-") or "-"
     if out == "-":
@@ -676,6 +774,17 @@ def deconv(args):
     else:
         result.to_csv(out, sep="\t")
         log.info("Wrote deconvolution results to %s", out)
+
+    if rankcorr and corr_rows:
+        corr_result = pd.DataFrame(corr_rows).T
+        corr_result.index.name = "sample"
+        corr_result = corr_result.sort_index(axis=1)
+        corr_path = out if out == "-" else out.replace(".tsv", "") + ".correlations.tsv"
+        if out == "-":
+            corr_result.to_csv(sys.stderr, sep="\t")
+        else:
+            corr_result.to_csv(corr_path, sep="\t")
+            log.info("Wrote correlation coefficients to %s", corr_path)
 
     if boot_stds:
         std_result = pd.DataFrame(boot_stds).T
