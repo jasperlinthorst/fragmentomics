@@ -1,6 +1,8 @@
 """Tests for cfstats.ff using mock models and mocked bincounts."""
 
 import io
+import logging
+import pickle as real_pickle
 
 import numpy as np
 import pytest
@@ -66,3 +68,46 @@ class TestFf:
 
         captured = capsys.readouterr()
         assert "0.12" in captured.out
+
+    def test_ff_warns_and_prefixes_chr_when_reference_lacks_prefix(self, make_args, caplog):
+        """If the reference uses non-prefixed contig names, 'chr' should be
+        prefixed to the bincount columns so the model features still match."""
+        feats = self._feats(2)
+        fake_columns = ["1_0_50000", "1_50000_100000"]
+        fake_counts = np.array([[100, 200]])
+        model_bytes = real_pickle.dumps((_FakeClf(), feats))
+
+        with mock.patch("cfstats.ff.bincounts") as mock_bc, \
+             mock.patch("builtins.open", mock.mock_open(read_data=model_bytes)):
+            mock_bc.bincounts.return_value = (fake_columns, fake_counts)
+
+            from cfstats.ff import ff
+            args = make_args(model="dummy.pickle")
+            with caplog.at_level(logging.WARNING, logger="cfstats.ff"):
+                result = ff(args, cmdline=False)
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0] == pytest.approx(0.12)
+        assert "not 'chr'-prefixed" in caplog.text
+
+    def test_ff_does_not_warn_when_columns_already_prefixed(self, make_args, caplog):
+        """No opportunistic prefixing/warning is needed when everything is already
+        'chr'-prefixed."""
+        feats = self._feats(2)
+        fake_columns = list(feats)
+        fake_counts = np.array([[100, 200]])
+        model_bytes = real_pickle.dumps((_FakeClf(), feats))
+
+        with mock.patch("cfstats.ff.bincounts") as mock_bc, \
+             mock.patch("builtins.open", mock.mock_open(read_data=model_bytes)):
+            mock_bc.bincounts.return_value = (fake_columns, fake_counts)
+
+            from cfstats.ff import ff
+            args = make_args(model="dummy.pickle")
+            with caplog.at_level(logging.WARNING, logger="cfstats.ff"):
+                result = ff(args, cmdline=False)
+
+        assert result is not None
+        assert result[0] == pytest.approx(0.12)
+        assert "not 'chr'-prefixed" not in caplog.text

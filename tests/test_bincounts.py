@@ -1,9 +1,13 @@
 """Integration tests for cfstats.bincounts using a tiny synthetic BAM."""
 
+import logging
+import os
+
 import numpy as np
 import pytest
 
 from cfstats import bincounts
+from tests.conftest import _write_fasta, _write_bam
 
 
 class TestBincounts:
@@ -59,3 +63,24 @@ class TestBincounts:
         args = make_args(nproc=2, name=False, binsize=5000, gccorrect=False)
         with pytest.raises(ValueError, match="--noname cannot be used"):
             bincounts.bincounts(args, cmdline=True)
+
+    def test_bam_fasta_chr_prefix_mismatch(self, make_args, tmp_path, caplog):
+        """A BAM with '1' reference names mapped against a FASTA with 'chr1' should
+        still produce counts under the FASTA contig names."""
+        ref_path = tmp_path / "ref.fa"
+        bam_path = str(tmp_path / "reads.bam")
+        _write_fasta(str(ref_path), chrom="chr1", length=10000)
+        _write_bam(bam_path, str(ref_path), chrom="1", n_pairs=20)
+
+        args = make_args(
+            reference=str(ref_path),
+            samfiles=[bam_path],
+            binsize=5000,
+            gccorrect=False,
+        )
+        with caplog.at_level(logging.WARNING, logger="cfstats.bincounts"):
+            labels, counts = bincounts.bincounts(args, cmdline=False)
+
+        assert counts.sum() > 0
+        assert all(lbl.split("_")[0] == "chr1" for lbl in labels)
+        assert "differ from FASTA names by a 'chr' prefix" in caplog.text

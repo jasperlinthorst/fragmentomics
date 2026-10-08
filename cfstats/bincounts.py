@@ -25,6 +25,23 @@ def worker_bincounts(pl):
     for ref in fasta.references:
         refl[ref]=fasta.get_reference_length(ref)
         bins[ref]=np.zeros(int(refl[ref]/args.binsize)+1)
+
+    # Opportunistically map BAM/CRAM reference names to FASTA names when they
+    # differ only by a 'chr' prefix and the lengths match.
+    log = logging.getLogger(__name__)
+    fasta_refs = set(fasta.references)
+    fasta_lengths = dict(zip(fasta.references, fasta.lengths))
+    ref_alias = {}
+    for cram_ref, cram_len in zip(cram.references, cram.lengths):
+        if cram_ref in fasta_refs and fasta_lengths[cram_ref] == cram_len:
+            continue
+        candidates = ['chr' + cram_ref] if not cram_ref.startswith('chr') else [cram_ref[3:]]
+        for alt in candidates:
+            if alt in fasta_refs and fasta_lengths[alt] == cram_len:
+                ref_alias[cram_ref] = alt
+                break
+    if ref_alias:
+        log.warning("Reference names in %s differ from FASTA names by a 'chr' prefix; mapping %s", samfile, ref_alias)
     
     if args.maxo!=None:
         total_mapped_reads = sum([int(l.split("\t")[2]) for l in pysam.idxstats(cram.filename).split("\n")[:-1]])
@@ -45,7 +62,10 @@ def worker_bincounts(pl):
         
         if read.mapping_quality>=args.mapqual:
             if not read.is_unmapped and not read.is_duplicate:
-                bins[read.reference_name][int(read.pos/args.binsize)]+=1
+                ref_name = ref_alias.get(read.reference_name, read.reference_name)
+                if ref_name not in bins:
+                    continue
+                bins[ref_name][int(read.pos/args.binsize)]+=1
     
     return {'samfile':samfile, 'd':bins}
 
