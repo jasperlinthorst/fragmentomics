@@ -68,32 +68,42 @@ def ff(args, cmdline=True):
     args.mapqual=1
     args.gccorrect=False
 
-    log.info("Binning read counts...")
-    columns, counts = bincounts.bincounts(args,cmdline=False)
-    log.info("Binning done.")
-
     if hf_token:
         from cfstats.models import remote_ff_predict
         log.info('Using remote FF API')
-        columns = _maybe_prefix_chr(columns, log=log)
-        ffs = remote_ff_predict(columns, np.array(counts, dtype=np.float64), hf_token)
+        clf = None
+        feats = None
     else:
         tup=pickle.load(open(args.model, 'rb'))
         #TODO: determine number and type of features based on model
         clf=tup[0]
         feats=tup[1]
 
-        columns = _maybe_prefix_chr(columns, feats=feats, log=log)
+    log.info("Binning read counts...")
+    predictions = {}
+    model_columns = None
+    for columns, smp, counts in bincounts.iter_bincounts(args):
+        if model_columns is None:
+            model_columns = _maybe_prefix_chr(columns, feats=feats, log=log)
 
-        X=pd.DataFrame(counts,columns=columns)
-        
-        #norm and select bins
-        X=X.div(X.sum(axis=1),axis=0).loc[:,feats]
+        if hf_token:
+            ffs = remote_ff_predict(
+                model_columns,
+                np.array([counts], dtype=np.float64),
+                hf_token,
+            )
+        else:
+            X=pd.DataFrame([counts],columns=model_columns)
 
-        ffs=clf.predict(X)
+            #norm and select bins
+            X=X.div(X.sum(axis=1),axis=0).loc[:,feats]
+            ffs=clf.predict(X)
 
-    if cmdline:
-        for smp,ffval in zip(args.samfiles, ffs):
-            sys.stdout.write("%s\t%s\n"%(smp,ffval))
-    else:
-        return ffs
+        predictions[smp] = ffs[0]
+        if cmdline:
+            sys.stdout.write("%s\t%s\n"%(smp,ffs[0]))
+            sys.stdout.flush()
+
+    log.info("Binning done.")
+    if not cmdline:
+        return np.array([predictions[s] for s in args.samfiles])

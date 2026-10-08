@@ -69,7 +69,7 @@ def worker_bincounts(pl):
     
     return {'samfile':samfile, 'd':bins}
 
-def bincounts(args, cmdline=True):
+def iter_bincounts(args):
     log=logging.getLogger(__name__)
     if args.reference==None:
         raise ValueError("Reference file is required.")
@@ -88,46 +88,56 @@ def bincounts(args, cmdline=True):
             end=str(((bini+1)*args.binsize if (bini+1)*args.binsize<refl[ref] else refl[ref]))
             reflabels.append("%s_%s_%s"%(ref,start,end))
 
-    if cmdline and args.header:
-        if args.name:
-            sys.stdout.write("filename\t")
-        sys.stdout.write("\t".join(reflabels)+"\n")
-        sys.stdout.flush()
+    payload = zip(args.samfiles, [args]*len(args.samfiles))
+    if args.nproc > 1:
+        pool = Pool(args.nproc)
+        results = pool.imap_unordered(worker_bincounts, payload)
+    else:
+        pool = None
+        results = map(worker_bincounts, payload)
 
+    try:
+        for result in results:
+            samfile = result["samfile"]
+            bins = result["d"]
+
+            v=[]
+            for ref in bins:
+                v+=list(bins[ref])
+
+            v=np.array(v)
+
+            if v.sum()<args.x:
+                log.warn("Normalisation unit (x=%d) is smaller than total read count. Consider ignoring sample=%s"%(args.x,samfile))
+
+            if args.gccorrect:
+                #gc correct
+                dfcnt=pd.DataFrame([v], columns=reflabels)
+                gc_content = utils.get_gc_content(dfcnt, args.reference)
+                dfcnt_corrected = utils.gc_correct_counts(dfcnt, gc_content, frac=args.frac)
+                v = dfcnt_corrected.iloc[0].values.copy()
+                v[v<0]=0 #make sure gc corrected counts can not become negative
+
+            yield reflabels, samfile, v
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
+
+
+def bincounts(args, cmdline=True):
     V={}
+    reflabels=[]
 
-    def _iter_results():
-        payload = zip(args.samfiles, [args]*len(args.samfiles))
-        if args.nproc > 1:
-            with Pool(args.nproc) as pool:
-                yield from pool.imap_unordered(worker_bincounts, payload)
-        else:
-            for pl in payload:
-                yield worker_bincounts(pl)
+    for reflabels, samfile, v in iter_bincounts(args):
+        if cmdline and args.header and not V:
+            if args.name:
+                sys.stdout.write("filename\t")
+            sys.stdout.write("\t".join(reflabels)+"\n")
+            sys.stdout.flush()
 
-    for result in _iter_results():
-        samfile = result["samfile"]
-        bins = result["d"]
-
-        v=[]
-        for ref in bins:
-            v+=list(bins[ref])
-
-        v=np.array(v)
-
-        if v.sum()<args.x:
-            log.warn("Normalisation unit (x=%d) is smaller than total read count. Consider ignoring sample=%s"%(args.x,samfile))
-
-        if args.gccorrect:
-            #gc correct
-            dfcnt=pd.DataFrame([v], columns=reflabels)
-            gc_content = utils.get_gc_content(dfcnt, args.reference)
-            dfcnt_corrected = utils.gc_correct_counts(dfcnt, gc_content, frac=args.frac)
-            v = dfcnt_corrected.iloc[0].values.copy()
-            v[v<0]=0 #make sure gc corrected counts can not become negative
-
+        V[samfile] = v
         if not cmdline:
-            V[samfile] = v
             continue
 
         if args.name:

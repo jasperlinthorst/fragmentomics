@@ -19,6 +19,12 @@ class TestFf:
     def _feats(self, n=3):
         return [f"chr1_{i*50000}_{(i+1)*50000}" for i in range(n)]
 
+    def _mock_bincounts(self, mock_bc, columns, counts):
+        mock_bc.iter_bincounts.side_effect = lambda args: (
+            (columns, samfile, row)
+            for samfile, row in zip(args.samfiles, counts)
+        )
+
     def _mock_context(self, feats, fake_columns, fake_counts):
         """Context manager that mocks bincounts and pickle.load(open(...))."""
         import pickle as real_pickle
@@ -39,7 +45,7 @@ class TestFf:
 
         with mock.patch("cfstats.ff.bincounts") as mock_bc, \
              mock.patch("builtins.open", mock.mock_open(read_data=model_bytes)):
-            mock_bc.bincounts.return_value = (fake_columns, fake_counts)
+            self._mock_bincounts(mock_bc, fake_columns, fake_counts)
 
             from cfstats.ff import ff
             args = make_args(model="dummy.pickle")
@@ -60,7 +66,7 @@ class TestFf:
 
         with mock.patch("cfstats.ff.bincounts") as mock_bc, \
              mock.patch("builtins.open", mock.mock_open(read_data=model_bytes)):
-            mock_bc.bincounts.return_value = (fake_columns, fake_counts)
+            self._mock_bincounts(mock_bc, fake_columns, fake_counts)
 
             from cfstats.ff import ff
             args = make_args(model="dummy.pickle")
@@ -78,16 +84,42 @@ class TestFf:
         bamlist.write_text("sample1.bam\nsample2.bam\n")
 
         with mock.patch("cfstats.ff.bincounts") as mock_bc:
-            mock_bc.bincounts.return_value = (feats, fake_counts)
+            self._mock_bincounts(mock_bc, feats, fake_counts)
 
             from cfstats.ff import ff
             args = make_args(samfiles=[], bamlist=str(bamlist), model=str(model))
             ff(args, cmdline=True)
 
-        passed_args = mock_bc.bincounts.call_args.args[0]
+        passed_args = mock_bc.iter_bincounts.call_args.args[0]
         assert passed_args.samfiles == ["sample1.bam", "sample2.bam"]
         assert passed_args.bamlist is None
         assert len(capsys.readouterr().out.splitlines()) == 2
+
+    def test_ff_streams_predictions_in_completion_order(self, make_args):
+        feats = self._feats(3)
+        counts = np.array([100, 200, 150])
+        model_bytes = real_pickle.dumps((_FakeClf(), feats))
+        stdout = mock.Mock()
+
+        with mock.patch("cfstats.ff.bincounts.iter_bincounts", return_value=[
+                 (feats, "sample2.bam", counts),
+                 (feats, "sample1.bam", counts),
+             ]), \
+             mock.patch("builtins.open", mock.mock_open(read_data=model_bytes)), \
+             mock.patch("cfstats.ff.sys.stdout", stdout):
+            from cfstats.ff import ff
+            args = make_args(
+                samfiles=["sample1.bam", "sample2.bam"],
+                model="dummy.pickle",
+            )
+            ff(args, cmdline=True)
+
+        assert stdout.method_calls == [
+            mock.call.write("sample2.bam\t0.12\n"),
+            mock.call.flush(),
+            mock.call.write("sample1.bam\t0.12\n"),
+            mock.call.flush(),
+        ]
 
     def test_ff_warns_and_prefixes_chr_when_reference_lacks_prefix(self, make_args, caplog):
         """If the reference uses non-prefixed contig names, 'chr' should be
@@ -99,7 +131,7 @@ class TestFf:
 
         with mock.patch("cfstats.ff.bincounts") as mock_bc, \
              mock.patch("builtins.open", mock.mock_open(read_data=model_bytes)):
-            mock_bc.bincounts.return_value = (fake_columns, fake_counts)
+            self._mock_bincounts(mock_bc, fake_columns, fake_counts)
 
             from cfstats.ff import ff
             args = make_args(model="dummy.pickle")
@@ -121,7 +153,7 @@ class TestFf:
 
         with mock.patch("cfstats.ff.bincounts") as mock_bc, \
              mock.patch("builtins.open", mock.mock_open(read_data=model_bytes)):
-            mock_bc.bincounts.return_value = (fake_columns, fake_counts)
+            self._mock_bincounts(mock_bc, fake_columns, fake_counts)
 
             from cfstats.ff import ff
             args = make_args(model="dummy.pickle")
