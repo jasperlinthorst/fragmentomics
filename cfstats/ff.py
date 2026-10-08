@@ -57,6 +57,10 @@ def _maybe_prefix_chr(columns, feats=None, log=None):
 def ff(args, cmdline=True):
 
     hf_token = getattr(args, 'hf_token', None)
+    min_ff = getattr(args, 'min_ff', 0.01)
+    max_ff = getattr(args, 'max_ff', 1.0)
+    if min_ff > max_ff:
+        raise ValueError("--min-ff cannot be greater than --max-ff")
 
     args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
     args.bamlist = None
@@ -99,9 +103,16 @@ def ff(args, cmdline=True):
             X=X.div(X.sum(axis=1),axis=0).loc[:,feats]
             ffs=clf.predict(X)
 
-        predictions[smp] = ffs[0]
+        raw_ff = float(ffs[0])
+        ffval = min(max(raw_ff, min_ff), max_ff)
+        if ffval != raw_ff:
+            log.warning(
+                "FF prediction for %s (%.6g) is outside [%.6g, %.6g]; reporting %.6g",
+                smp, raw_ff, min_ff, max_ff, ffval,
+            )
+        predictions[smp] = ffval
         if cmdline:
-            sys.stdout.write("%s\t%s\n"%(smp,ffs[0]))
+            sys.stdout.write("%s\t%s\n"%(smp,ffval))
             sys.stdout.flush()
 
     log.info("Binning done.")

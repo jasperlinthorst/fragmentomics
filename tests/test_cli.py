@@ -79,6 +79,22 @@ class TestArgParsing:
         code = self._parse(["ff"])
         assert code == 2
 
+    def test_ff_bounds_are_configurable(self):
+        from cfstats.__main__ import lazy_cmd, main
+        old_argv = sys.argv
+        try:
+            sys.argv = [
+                "cfstats", "ff", "sample.bam", "--confirm-licence",
+                "--min-ff", "0.02", "--max-ff", "0.75",
+            ]
+            with mock.patch.object(lazy_cmd, "__call__") as call:
+                main()
+            args = call.call_args.args[0]
+            assert args.min_ff == pytest.approx(0.02)
+            assert args.max_ff == pytest.approx(0.75)
+        finally:
+            sys.argv = old_argv
+
     def test_dnase1l3_missing_args_exits_2(self):
         code = self._parse(["dnase1l3"])
         assert code == 2

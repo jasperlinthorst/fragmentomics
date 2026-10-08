@@ -223,6 +223,8 @@ def main():
     parser_ff.add_argument('--model', dest='model', default=get_model_path('ffpredictor_50kautosomalbins.pickle'), help='Regression model that can be used to predict the fetal fraction.')
     parser_ff.add_argument('--confirm-licence', dest='confirm_licence', action='store_true', default=False, help='Confirm acceptance of the model licence (non-commercial, research-only use). Bypasses the interactive licence prompt.')
     parser_ff.add_argument('--hf-token', dest='hf_token', default=None, help='Hugging Face token for remote FF API. When set, uses the remote cfstats-umap-api Space instead of the local model.')
+    parser_ff.add_argument('--min-ff', dest='min_ff', default=0.01, type=float, help='Minimum reported fetal fraction.')
+    parser_ff.add_argument('--max-ff', dest='max_ff', default=1.0, type=float, help='Maximum reported fetal fraction.')
     parser_ff.set_defaults(func=lazy_cmd('ff', 'ff'), requires_licence=True)
 
     parser_nipt = subparsers.add_parser('nipt', prog="cfstats nipt", description="Perform typical NIPT analysis", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])

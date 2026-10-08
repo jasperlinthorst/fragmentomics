@@ -15,6 +15,16 @@ class _FakeClf:
         return np.array([0.12] * len(X))
 
 
+class _FakeLowClf:
+    def predict(self, X):
+        return np.array([-0.25] * len(X))
+
+
+class _FakeHighClf:
+    def predict(self, X):
+        return np.array([1.25] * len(X))
+
+
 class TestFf:
     def _feats(self, n=3):
         return [f"chr1_{i*50000}_{(i+1)*50000}" for i in range(n)]
@@ -54,6 +64,47 @@ class TestFf:
         assert result is not None
         assert len(result) == 1
         assert result[0] == pytest.approx(0.12)
+
+    def test_ff_clamps_predictions_to_one_percent(self, make_args, capsys, caplog):
+        feats = self._feats(3)
+        fake_counts = np.array([[100, 200, 150]])
+        model_bytes = real_pickle.dumps((_FakeLowClf(), feats))
+
+        with mock.patch("cfstats.ff.bincounts") as mock_bc, \
+             mock.patch("builtins.open", mock.mock_open(read_data=model_bytes)):
+            self._mock_bincounts(mock_bc, feats, fake_counts)
+
+            from cfstats.ff import ff
+            args = make_args(model="dummy.pickle")
+            result = ff(args, cmdline=False)
+            ff(args, cmdline=True)
+
+        assert result[0] == pytest.approx(0.01)
+        assert capsys.readouterr().out.endswith("\t0.01\n")
+        assert "outside [0.01, 1]" in caplog.text
+
+    def test_ff_clamps_to_custom_maximum(self, make_args, caplog):
+        feats = self._feats(3)
+        fake_counts = np.array([[100, 200, 150]])
+        model_bytes = real_pickle.dumps((_FakeHighClf(), feats))
+
+        with mock.patch("cfstats.ff.bincounts") as mock_bc, \
+             mock.patch("builtins.open", mock.mock_open(read_data=model_bytes)):
+            self._mock_bincounts(mock_bc, feats, fake_counts)
+
+            from cfstats.ff import ff
+            args = make_args(model="dummy.pickle", min_ff=0.05, max_ff=0.8)
+            result = ff(args, cmdline=False)
+
+        assert result[0] == pytest.approx(0.8)
+        assert "outside [0.05, 0.8]" in caplog.text
+
+    def test_ff_rejects_inverted_bounds(self, make_args):
+        from cfstats.ff import ff
+
+        args = make_args(min_ff=0.5, max_ff=0.1)
+        with pytest.raises(ValueError, match="--min-ff cannot be greater"):
+            ff(args, cmdline=False)
 
     def test_ff_cmdline_writes_stdout(self, make_args, capsys):
         """ff() with cmdline=True should write predictions to stdout."""
