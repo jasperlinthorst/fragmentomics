@@ -69,6 +69,26 @@ class TestFf:
         captured = capsys.readouterr()
         assert "0.12" in captured.out
 
+    def test_ff_consumes_bamlist_once(self, make_args, tmp_path, capsys):
+        feats = self._feats(3)
+        fake_counts = np.array([[100, 200, 150], [200, 100, 150]])
+        model = tmp_path / "model.pickle"
+        model.write_bytes(real_pickle.dumps((_FakeClf(), feats)))
+        bamlist = tmp_path / "bams.txt"
+        bamlist.write_text("sample1.bam\nsample2.bam\n")
+
+        with mock.patch("cfstats.ff.bincounts") as mock_bc:
+            mock_bc.bincounts.return_value = (feats, fake_counts)
+
+            from cfstats.ff import ff
+            args = make_args(samfiles=[], bamlist=str(bamlist), model=str(model))
+            ff(args, cmdline=True)
+
+        passed_args = mock_bc.bincounts.call_args.args[0]
+        assert passed_args.samfiles == ["sample1.bam", "sample2.bam"]
+        assert passed_args.bamlist is None
+        assert len(capsys.readouterr().out.splitlines()) == 2
+
     def test_ff_warns_and_prefixes_chr_when_reference_lacks_prefix(self, make_args, caplog):
         """If the reference uses non-prefixed contig names, 'chr' should be
         prefixed to the bincount columns so the model features still match."""

@@ -59,6 +59,7 @@ def ff(args, cmdline=True):
     hf_token = getattr(args, 'hf_token', None)
 
     args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
+    args.bamlist = None
 
     #for now use hardcoded match with how our model was trained
     args.binsize=50000

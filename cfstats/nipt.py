@@ -51,6 +51,7 @@ def calc_llr_ff_t21(tup, ff=0.01): #initialize ff to 1%, then update if positive
 def nipt(args):
 
     args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
+    args.bamlist = None
 
     #load reference dataset
 
