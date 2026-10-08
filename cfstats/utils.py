@@ -118,3 +118,19 @@ def collect_bam_files(samfiles, bamlist=None):
         with open(bamlist) as fh:
             files += [line.strip() for line in fh if line.strip()]
     return files
+
+
+def require_sample_names(args):
+    """Raise if multiprocessing is requested without sample-name prefixes.
+
+    When results are streamed as workers complete, rows are written in
+    completion order. Without a sample-name prefix/column the rows can no
+    longer be matched to their source sample.
+    """
+    nproc = getattr(args, "nproc", 1) or 1
+    if nproc > 1 and not getattr(args, "name", True):
+        raise ValueError(
+            "--noname cannot be used with --nproc > 1 because results are "
+            "written as each sample completes. Either keep the sample-name "
+            "prefix or use --nproc 1."
+        )

@@ -55,6 +55,7 @@ def bincounts(args, cmdline=True):
         raise ValueError("Reference file is required.")
 
     args.samfiles = utils.collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
+    utils.require_sample_names(args)
 
     reflabels=[]
     #determine bin labels
@@ -67,21 +68,33 @@ def bincounts(args, cmdline=True):
             end=str(((bini+1)*args.binsize if (bini+1)*args.binsize<refl[ref] else refl[ref]))
             reflabels.append("%s_%s_%s"%(ref,start,end))
 
-    with Pool(args.nproc) as pool:
-        results = pool.map(worker_bincounts, zip(args.samfiles, [args]*len(args.samfiles)))
+    if cmdline and args.header:
+        if args.name:
+            sys.stdout.write("filename\t")
+        sys.stdout.write("\t".join(reflabels)+"\n")
+        sys.stdout.flush()
 
-    V=[]
-    
-    for i,result in enumerate(results):
+    V={}
+
+    def _iter_results():
+        payload = zip(args.samfiles, [args]*len(args.samfiles))
+        if args.nproc > 1:
+            with Pool(args.nproc) as pool:
+                yield from pool.imap_unordered(worker_bincounts, payload)
+        else:
+            for pl in payload:
+                yield worker_bincounts(pl)
+
+    for result in _iter_results():
         samfile = result["samfile"]
         bins = result["d"]
-        
+
         v=[]
         for ref in bins:
             v+=list(bins[ref])
-        
+
         v=np.array(v)
-        
+
         if v.sum()<args.x:
             log.warn("Normalisation unit (x=%d) is smaller than total read count. Consider ignoring sample=%s"%(args.x,samfile))
 
@@ -91,30 +104,26 @@ def bincounts(args, cmdline=True):
             gc_content = utils.get_gc_content(dfcnt, args.reference)
             dfcnt_corrected = utils.gc_correct_counts(dfcnt, gc_content, frac=args.frac)
             v = dfcnt_corrected.iloc[0].values.copy()
-            v[v<0]=0 #make sure gc corrected counts can not become negative 
+            v[v<0]=0 #make sure gc corrected counts can not become negative
 
         if not cmdline:
-            V.append(v)
+            V[samfile] = v
             continue
-        else:
-            if args.header and samfile==args.samfiles[0]:
-                if args.name:
-                    sys.stdout.write("filename\t")
-                sys.stdout.write("\t".join(reflabels)+"\n")
-            
-            if args.name:
-                sys.stdout.write(samfile+"\t")
-            if args.norm=='freq':
-                vnorm=(np.array(v)/v.sum()).astype(np.float64)
-                sys.stdout.write("\t".join(map(str,vnorm))+"\n")
-            elif args.norm=='rpx':
-                if np.nansum(v)==0:
-                    vnorm=v
-                else:
-                    vnorm=(np.array(v)/(np.nansum(v)/args.x)).astype(np.uint32)
-                sys.stdout.write("\t".join(map(str,vnorm))+"\n")
+
+        if args.name:
+            sys.stdout.write(samfile+"\t")
+        if args.norm=='freq':
+            vnorm=(np.array(v)/v.sum()).astype(np.float64)
+            sys.stdout.write("\t".join(map(str,vnorm))+"\n")
+        elif args.norm=='rpx':
+            if np.nansum(v)==0:
+                vnorm=v
             else:
-                sys.stdout.write("\t".join(map(str,v))+"\n")
+                vnorm=(np.array(v)/(np.nansum(v)/args.x)).astype(np.uint32)
+            sys.stdout.write("\t".join(map(str,vnorm))+"\n")
+        else:
+            sys.stdout.write("\t".join(map(str,v))+"\n")
+        sys.stdout.flush()
 
     if not cmdline:
-        return reflabels, np.array(V)
+        return reflabels, np.array([V[s] for s in args.samfiles])

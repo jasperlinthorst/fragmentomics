@@ -10,7 +10,7 @@ import sys
 from multiprocessing import Pool
 import logging as log_module
 
-from cfstats.utils import collect_bam_files
+from cfstats import utils
 
 
 def _soft_clipped(cigar):
@@ -316,7 +316,7 @@ def _choose_output_format(args):
 
 def fourier_transform_coverage(args):
     logger = log_module.getLogger("cfstats.fourier")
-    args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
+    args.samfiles = utils.collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
     output_format = _choose_output_format(args)
     args._return_periods = (output_format == 'long')
 
@@ -345,17 +345,8 @@ def fourier_transform_coverage(args):
             else:
                 setattr(args, attribute, preset)
 
-    if args.nproc > 1:
-        with Pool(args.nproc) as pool:
-            results = pool.map(
-                worker_fourier_transform_samfile,
-                zip(args.samfiles, [args] * len(args.samfiles)))
-    else:
-        results = [worker_fourier_transform_samfile((samfile, args))
-                   for samfile in args.samfiles]
-
     if output_format == 'long':
-        result = results[0]
+        result = worker_fourier_transform_samfile((args.samfiles[0], args))
         periods = _output_periods(args)
         sys.stdout.write("#Region\t" + "\t".join(map(str, periods)) + "\n")
         for gene, values in result['fft'].items():
@@ -364,6 +355,18 @@ def fourier_transform_coverage(args):
 
     # wide format: samples as rows, genes as columns
     if getattr(args, "leuven", False):
+        # Leuven wide output needs the union of all observed genes before the
+        # header can be written, so results are buffered but computed in parallel.
+        utils.require_sample_names(args)
+        if args.nproc > 1:
+            with Pool(args.nproc) as pool:
+                results = list(pool.imap_unordered(
+                    worker_fourier_transform_samfile,
+                    zip(args.samfiles, [args] * len(args.samfiles))))
+        else:
+            results = [worker_fourier_transform_samfile((samfile, args))
+                       for samfile in args.samfiles]
+
         all_genes = []
         seen = set()
         for r in results:
@@ -374,6 +377,7 @@ def fourier_transform_coverage(args):
         if not all_genes:
             return
         sys.stdout.write("#filename\t" + "\t".join(all_genes) + "\n")
+        sys.stdout.flush()
         for result in results:
             fft_values = result['fft']
             row = [result['samfile']]
@@ -381,12 +385,25 @@ def fourier_transform_coverage(args):
                 value = fft_values.get(gene)
                 row.append("nan" if value is None else str(value))
             sys.stdout.write("\t".join(row) + "\n")
+            sys.stdout.flush()
     else:
+        utils.require_sample_names(args)
         header_written = False
-        for result in results:
+        if args.nproc > 1:
+            with Pool(args.nproc) as pool:
+                iterator = pool.imap_unordered(
+                    worker_fourier_transform_samfile,
+                    zip(args.samfiles, [args] * len(args.samfiles)))
+        else:
+            iterator = (worker_fourier_transform_samfile((samfile, args))
+                        for samfile in args.samfiles)
+
+        for result in iterator:
             fft_values = result['fft']
             if not header_written:
                 sys.stdout.write("#filename\t" + "\t".join(fft_values) + "\n")
+                sys.stdout.flush()
                 header_written = True
             sys.stdout.write("\t".join(
                 [result['samfile']] + list(map(str, fft_values.values()))) + "\n")
+            sys.stdout.flush()

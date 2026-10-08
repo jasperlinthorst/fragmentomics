@@ -147,6 +147,58 @@ class TestDeconvolve:
 
 
 # ---------------------------------------------------------------------------
+# ranked correlation (Leuven/Kate method)
+# ---------------------------------------------------------------------------
+
+class TestRankCorrelate:
+    def _make_reference(self, n_genes=200, seed=0):
+        rng = np.random.RandomState(seed)
+        genes = [f"ENSG{i:011d}" for i in range(n_genes)]
+        data = rng.rand(n_genes, 3)
+        return pd.DataFrame(
+            data, index=genes, columns=["type_a", "type_b", "type_c"])
+
+    def test_negative_correlator_gets_rank_one(self):
+        """The column most negatively correlated with the signal (strongest
+        contribution, since FFT-WPS decreases with expression) must be rank 1."""
+        from cfstats.deconv import rank_correlate
+        ref = self._make_reference()
+        # signal = -(type_b) + noise-free: type_b should correlate at -1
+        signal = pd.Series(-ref["type_b"].values, index=ref.index, name="s1")
+        ranks, corr = rank_correlate(signal, ref)
+        assert corr["type_b"] == pytest.approx(-1.0)
+        assert ranks["type_b"] == 1
+
+    def test_ranks_are_permutation_ascending_correlation(self):
+        from cfstats.deconv import rank_correlate
+        ref = self._make_reference()
+        rng = np.random.RandomState(1)
+        signal = pd.Series(rng.rand(ref.shape[0]), index=ref.index, name="s1")
+        ranks, corr = rank_correlate(signal, ref)
+        assert sorted(ranks.values) == [1, 2, 3]
+        order = corr.sort_values().index
+        for i, name in enumerate(order):
+            assert ranks[name] == i + 1
+
+    def test_nan_column_ranks_last(self):
+        from cfstats.deconv import rank_correlate
+        ref = self._make_reference()
+        ref["type_c"] = np.nan
+        rng = np.random.RandomState(2)
+        signal = pd.Series(rng.rand(ref.shape[0]), index=ref.index, name="s1")
+        ranks, corr = rank_correlate(signal, ref)
+        assert np.isnan(corr["type_c"])
+        assert ranks["type_c"] == 3
+
+    def test_too_few_shared_genes_raises(self):
+        from cfstats.deconv import rank_correlate
+        ref = self._make_reference()
+        signal = pd.Series([1.0, 2.0], index=["ENSGx", "ENSGy"], name="s1")
+        with pytest.raises(RuntimeError):
+            rank_correlate(signal, ref)
+
+
+# ---------------------------------------------------------------------------
 # CLI registration
 # ---------------------------------------------------------------------------
 

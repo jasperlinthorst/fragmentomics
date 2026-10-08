@@ -44,3 +44,8 @@ class TestFivePrimeEnds:
         result = fpends._5pends(args, cmdline=False)
         assert isinstance(result[0], np.ndarray)
         assert len(result[0]) == 256
+
+    def test_noname_with_multiprocess_raises(self, make_args):
+        args = make_args(nproc=2, name=False)
+        with pytest.raises(ValueError, match="--noname cannot be used"):
+            fpends._5pends(args, cmdline=True)

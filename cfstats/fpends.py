@@ -90,12 +90,21 @@ def worker_5pends(pl):
 def _5pends(args, cmdline=True):
     
     args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
+    utils.require_sample_names(args)
 
-    v=[]
-    with Pool(args.nproc) as pool:
-        results = pool.map(worker_5pends, zip(args.samfiles, [args]*len(args.samfiles)))
+    v={}
+    header_written = False
 
-    for result in results:
+    def _iter_results():
+        payload = zip(args.samfiles, [args]*len(args.samfiles))
+        if args.nproc > 1:
+            with Pool(args.nproc) as pool:
+                yield from pool.imap_unordered(worker_5pends, payload)
+        else:
+            for pl in payload:
+                yield worker_5pends(pl)
+
+    for result in _iter_results():
         samfile = result["samfile"]
         d = result["d"]
 
@@ -109,20 +118,24 @@ def _5pends(args, cmdline=True):
             f = np.array(list(d.values()))
 
         if not cmdline:
-            v.append(f)
+            v[samfile] = f
             continue
-        
-        if args.header and samfile == args.samfiles[0]:
+
+        if args.header and not header_written:
             if args.name:
                 sys.stdout.write("filename\t")
             sys.stdout.write("\t".join(map(str, list(d.keys()))) + "\n")
+            sys.stdout.flush()
+            header_written = True
 
         if args.name:
             sys.stdout.write(samfile + "\t")
 
         sys.stdout.write("\t".join(map(str, f)) + "\n")
+        sys.stdout.flush()
 
-    return v
+    if not cmdline:
+        return [v[s] for s in args.samfiles]
 
 def _5pendsbysize(args, cmdline=True):
     

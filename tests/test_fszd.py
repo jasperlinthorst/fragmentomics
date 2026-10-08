@@ -38,3 +38,9 @@ class TestFszd:
         result = fszd.fszd(args, cmdline=False)
         assert isinstance(result[0], np.ndarray)
         assert len(result[0]) == 540
+
+    def test_noname_with_multiprocess_raises(self, make_args):
+        """--noname with --nproc > 1 must be rejected so rows remain traceable."""
+        args = make_args(nproc=2, name=False)
+        with pytest.raises(ValueError, match="--noname cannot be used"):
+            fszd.fszd(args, cmdline=True)

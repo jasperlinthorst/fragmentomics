@@ -37,3 +37,8 @@ class TestCleaveSiteMotifs:
         result = csm.cleavesitemotifs(args, cmdline=False)
         # k=2 lexsmallest -> 10 motifs
         assert len(result[0]) == 10
+
+    def test_noname_with_multiprocess_raises(self, make_args):
+        args = make_args(nproc=2, name=False)
+        with pytest.raises(ValueError, match="--noname cannot be used"):
+            csm.cleavesitemotifs(args, cmdline=True)

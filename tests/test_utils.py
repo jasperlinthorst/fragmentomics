@@ -1,5 +1,6 @@
 """Tests for cfstats.utils — pure helper functions."""
 
+import argparse
 import numpy as np
 import pandas as pd
 import pytest
@@ -119,3 +120,22 @@ class TestGcCorrectCounts:
         corrected = utils.gc_correct_counts(counts, gc, frac=0.5)
         # Row with sum==0 should be returned as-is
         np.testing.assert_array_equal(corrected.values, counts.values)
+
+
+# ---------------------------------------------------------------------------
+# require_sample_names
+# ---------------------------------------------------------------------------
+
+class TestRequireSampleNames:
+    def test_no_error_when_name_is_true(self):
+        args = argparse.Namespace(nproc=4, name=True)
+        utils.require_sample_names(args)  # should not raise
+
+    def test_no_error_when_single_process(self):
+        args = argparse.Namespace(nproc=1, name=False)
+        utils.require_sample_names(args)  # should not raise
+
+    def test_raises_when_multiprocess_and_noname(self):
+        args = argparse.Namespace(nproc=4, name=False)
+        with pytest.raises(ValueError, match="--noname cannot be used"):
+            utils.require_sample_names(args)

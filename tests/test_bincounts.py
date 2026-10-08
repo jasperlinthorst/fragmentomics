@@ -54,3 +54,8 @@ class TestBincounts:
         args = make_args(bamlist=None, binsize=5000, gccorrect=False)
         labels, counts = bincounts.bincounts(args, cmdline=False)
         assert counts.sum() > 0
+
+    def test_noname_with_multiprocess_raises(self, make_args):
+        args = make_args(nproc=2, name=False, binsize=5000, gccorrect=False)
+        with pytest.raises(ValueError, match="--noname cannot be used"):
+            bincounts.bincounts(args, cmdline=True)

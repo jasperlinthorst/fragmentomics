@@ -24,7 +24,7 @@ import pysam
 from scipy.signal import savgol_filter
 
 from cfstats.sites import load_sites
-from cfstats.utils import collect_bam_files
+from cfstats import utils
 
 log = logging.getLogger(__name__)
 
@@ -228,12 +228,14 @@ def _write_profile(out_dir, samfile, profiles):
 
 def siteprofile(args, cmdline=True):
     """``cfstats siteprofile`` entry point."""
-    args.samfiles = collect_bam_files(args.samfiles, getattr(args, "bamlist", None))
+    args.samfiles = utils.collect_bam_files(args.samfiles, getattr(args, "bamlist", None))
     if not args.samfiles:
         raise ValueError("No input alignment files provided.")
 
     if getattr(args, "gc_bias", None) is not None and args.reference is None:
         raise ValueError("--gc-bias requires -r/--reference (for fragment GC content).")
+
+    utils.require_sample_names(args)
 
     chroms = args.chroms if getattr(args, "chroms", None) else None
     sites_by_list = load_sites(
@@ -247,27 +249,46 @@ def siteprofile(args, cmdline=True):
 
     nproc = getattr(args, "nproc", 1) or 1
     payload = [(s, args, sites_by_list) for s in args.samfiles]
-    if nproc > 1 and len(payload) > 1:
-        with Pool(nproc) as pool:
-            results = list(pool.imap_unordered(_worker_siteprofile, payload))
-    else:
-        results = [_worker_siteprofile(pl) for pl in payload]
 
     all_rows = []
-    for result in results:
-        all_rows.extend(result["rows"])
+    header_written = False
+
+    def _process(result):
+        nonlocal header_written
+        rows = result["rows"]
         if getattr(args, "save_profile", None):
             _write_profile(args.save_profile, result["samfile"], result["profiles"])
+        if not rows:
+            return
+        if cmdline:
+            for row in rows:
+                if not header_written:
+                    if not getattr(args, "name", True):
+                        row = {k: v for k, v in row.items() if k != "filename"}
+                    sys.stdout.write("\t".join(row.keys()) + "\n")
+                    sys.stdout.flush()
+                    header_written = True
+                if not getattr(args, "name", True):
+                    row = {k: v for k, v in row.items() if k != "filename"}
+                sys.stdout.write("\t".join(str(v) for v in row.values()) + "\n")
+                sys.stdout.flush()
+        else:
+            all_rows.extend(rows)
 
-    if not all_rows:
-        raise RuntimeError("No profiles could be computed.")
+    if nproc > 1 and len(payload) > 1:
+        with Pool(nproc) as pool:
+            for result in pool.imap_unordered(_worker_siteprofile, payload):
+                _process(result)
+    else:
+        for pl in payload:
+            _process(_worker_siteprofile(pl))
 
-    table = pd.DataFrame(all_rows)
-    if not getattr(args, "name", True):
-        table = table.drop(columns=["filename"])
+    if not cmdline:
+        if not all_rows:
+            raise RuntimeError("No profiles could be computed.")
+        table = pd.DataFrame(all_rows)
+        if not getattr(args, "name", True):
+            table = table.drop(columns=["filename"])
+        return table
 
-    if cmdline:
-        table.to_csv(sys.stdout, sep="\t", index=False, header=args.header)
-        return None
-
-    return table
+    return None

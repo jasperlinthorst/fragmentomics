@@ -51,12 +51,26 @@ def worker_fszd(pl):
 def fszd(args, cmdline=True):
 
     args.samfiles = utils.collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
+    utils.require_sample_names(args)
 
-    V=[]
-    with Pool(args.nproc) as pool:
-        results = pool.map(worker_fszd, zip(args.samfiles, [args]*len(args.samfiles)))
-    
-    for result in results:
+    V={}
+
+    if cmdline and args.header:
+        if args.name:
+            sys.stdout.write("filename\t")
+        sys.stdout.write("\t".join(map(str, range(args.lower, args.upper))) + "\n")
+        sys.stdout.flush()
+
+    def _iter_results():
+        payload = zip(args.samfiles, [args]*len(args.samfiles))
+        if args.nproc > 1:
+            with Pool(args.nproc) as pool:
+                yield from pool.imap_unordered(worker_fszd, payload)
+        else:
+            for pl in payload:
+                yield worker_fszd(pl)
+
+    for result in _iter_results():
         samfile = result["samfile"]
         fszd = result["fszd"]
 
@@ -70,17 +84,17 @@ def fszd(args, cmdline=True):
             v = np.array([fszd[sz] for sz in range(args.lower, args.upper, 1)])
 
         if not cmdline:
-            V.append(v)#np.array([fszd[sz] for sz in range(args.lower, args.upper, 1)]))
-        else:
-            if args.header and samfile == args.samfiles[0]:
-                if args.name:
-                    sys.stdout.write("filename\t")
-                sys.stdout.write("\t".join(map(str, range(args.lower, args.upper))) + "\n")
-            if args.name:
-                sys.stdout.write(samfile + "\t")
-            sys.stdout.write("\t".join(map(str, v)) + "\n")
+            V[samfile] = v
+            continue
+
+        if args.name:
+            sys.stdout.write(samfile + "\t")
+        sys.stdout.write("\t".join(map(str, v)) + "\n")
+        sys.stdout.flush()
+
     if not cmdline:
-        return V
+        # Preserve input order for programmatic callers.
+        return [V[s] for s in args.samfiles]
 
 def fszd_old(args, cmdline=True):
     

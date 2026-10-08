@@ -191,17 +191,13 @@ def gcbias(args, cmdline=True):
 
     nproc = getattr(args, "nproc", 1) or 1
     payload = [(s, args) for s in args.samfiles]
-    if nproc > 1 and len(payload) > 1:
-        with Pool(nproc) as pool:
-            results = list(pool.imap_unordered(_worker_observed_counts, payload))
-    else:
-        results = [_worker_observed_counts(pl) for pl in payload]
 
     out_dir = getattr(args, "out_dir", None) or "."
     os.makedirs(out_dir, exist_ok=True)
 
     written = {}
-    for result in results:
+
+    def _process(result):
         samfile = result["samfile"]
         table = _build_bias_table(result["counts"], expected, args.size_range)
         sample = os.path.splitext(os.path.basename(samfile))[0]
@@ -211,6 +207,15 @@ def gcbias(args, cmdline=True):
         log.info("Wrote GC bias for %s -> %s", samfile, out_path)
         if cmdline:
             sys.stdout.write(f"{samfile}\t{out_path}\n")
+            sys.stdout.flush()
+
+    if nproc > 1 and len(payload) > 1:
+        with Pool(nproc) as pool:
+            for result in pool.imap_unordered(_worker_observed_counts, payload):
+                _process(result)
+    else:
+        for pl in payload:
+            _process(_worker_observed_counts(pl))
 
     if not cmdline:
         return written

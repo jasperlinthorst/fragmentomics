@@ -697,6 +697,18 @@ def _apply_leuven_presets(args, logger):
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+def _write_deconv_row(handle, samfile, values, columns, residual=None):
+    """Write one TSV row from a dict/Series of per-cell-type values."""
+    parts = [samfile]
+    if residual is not None:
+        parts.append(str(residual))
+    for col in columns:
+        val = values.get(col)
+        parts.append("nan" if val is None or (isinstance(val, float) and np.isnan(val)) else str(val))
+    handle.write("\t".join(parts) + "\n")
+    handle.flush()
+
+
 def deconv(args):
     """``cfstats deconv`` entry point.
 
@@ -704,6 +716,10 @@ def deconv(args):
     caches) a single-cell reference atlas, deconvolves each sample into
     fractional cell-type contributions, and writes a TSV where rows are samples
     and columns are cell types.
+
+    Results are streamed: each sample is deconvolved and written as soon as its
+    FFT-WPS signal is ready, so progress can be monitored when running with many
+    parallel workers.
     """
     args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
 
@@ -716,35 +732,50 @@ def deconv(args):
 
     ref = load_reference(args)
 
-    # compute per-sample signals
-    signals = {}
+    n_bootstrap = getattr(args, "n_bootstrap", 0) or 0
+    out = getattr(args, "output", "-") or "-"
+
+    out_handle = sys.stdout if out == "-" else open(out, "w")
+    corr_handle = None
+    std_handle = None
+    if rankcorr:
+        if out == "-":
+            corr_handle = sys.stderr
+        else:
+            corr_path = out.replace(".tsv", "") + ".correlations.tsv"
+            corr_handle = open(corr_path, "w")
+    elif n_bootstrap > 0:
+        if out != "-":
+            std_path = out.replace(".tsv", "") + ".bootstrap_std.tsv"
+            std_handle = open(std_path, "w")
+
+    columns = None
+    corr_columns = None
+    std_columns = None
+    n_rows = 0
+    residuals = {}
+
     db = _open_gene_db(args.gfffile)
     nproc = getattr(args, "nproc", 1) or 1
-    if nproc > 1:
-        from multiprocessing import Pool
-        with Pool(nproc) as pool:
-            for samfile, sig in pool.imap_unordered(
-                    _worker, [(s, args) for s in args.samfiles]):
-                signals[samfile] = sig
-    else:
-        for samfile in args.samfiles:
-            signals[samfile] = compute_sample_fftwps(samfile, args, db=db)
 
-    n_bootstrap = getattr(args, "n_bootstrap", 0) or 0
-
-    # deconvolve each sample
-    rows = {}
-    residuals = {}
-    boot_stds = {}
-    corr_rows = {}
-    for samfile in args.samfiles:
-        sig = signals[samfile]
+    def process(samfile, sig):
+        nonlocal columns, corr_columns, std_columns, n_rows
         try:
             if rankcorr:
                 ranks, correlations = rank_correlate(sig, ref)
-                rows[samfile] = ranks
-                corr_rows[samfile] = correlations
-                continue
+                if columns is None:
+                    columns = sorted(ranks.index)
+                    out_handle.write("sample\t" + "\t".join(columns) + "\n")
+                    out_handle.flush()
+                if corr_columns is None:
+                    corr_columns = sorted(correlations.index)
+                    corr_handle.write("sample\t" + "\t".join(corr_columns) + "\n")
+                    corr_handle.flush()
+                _write_deconv_row(out_handle, samfile, ranks.to_dict(), columns)
+                _write_deconv_row(corr_handle, samfile, correlations.to_dict(), corr_columns)
+                n_rows += 1
+                return
+
             fractions, residual, bootstrap_std = deconvolve(
                 sig, ref,
                 standardize=not args.no_standardize,
@@ -753,49 +784,48 @@ def deconv(args):
             )
         except RuntimeError as e:
             log.error("Deconvolution failed for %s: %s", samfile, e)
-            continue
-        rows[samfile] = fractions
-        residuals[samfile] = residual
-        if bootstrap_std is not None:
-            boot_stds[samfile] = bootstrap_std
+            return
 
-    if not rows:
+        if columns is None:
+            columns = sorted(fractions.index)
+            out_handle.write("sample\tfit_residual\t" + "\t".join(columns) + "\n")
+            out_handle.flush()
+            if std_handle is not None:
+                std_handle.write("sample\tfit_residual\t" + "\t".join(columns) + "\n")
+                std_handle.flush()
+            std_columns = columns
+
+        residuals[samfile] = residual
+        _write_deconv_row(out_handle, samfile, fractions.to_dict(), columns, residual=residual)
+        if std_handle is not None and bootstrap_std is not None:
+            _write_deconv_row(std_handle, samfile, bootstrap_std.to_dict(), std_columns, residual=residual)
+        n_rows += 1
+
+    try:
+        if nproc > 1:
+            from multiprocessing import Pool
+            with Pool(nproc) as pool:
+                for samfile, sig in pool.imap_unordered(
+                        _worker, [(s, args) for s in args.samfiles]):
+                    process(samfile, sig)
+        else:
+            for samfile in args.samfiles:
+                sig = compute_sample_fftwps(samfile, args, db=db)
+                process(samfile, sig)
+    finally:
+        if out_handle is not sys.stdout:
+            out_handle.close()
+        if corr_handle is not None and corr_handle is not sys.stderr:
+            corr_handle.close()
+        if std_handle is not None:
+            std_handle.close()
+
+    if n_rows == 0:
         raise RuntimeError("No samples could be deconvolved.")
 
-    result = pd.DataFrame(rows).T
-    result.index.name = "sample"
-    result = result.sort_index(axis=1)
-    if not rankcorr:
-        result.insert(0, "fit_residual", pd.Series(residuals))
+    if rankcorr and out == "-":
+        log.info("Correlation coefficients written to stderr.")
+    elif n_bootstrap > 0 and out == "-":
+        log.info("Bootstrap std written to stderr only (use -O to write to file).")
 
-    out = getattr(args, "output", "-") or "-"
-    if out == "-":
-        result.to_csv(sys.stdout, sep="\t")
-    else:
-        result.to_csv(out, sep="\t")
-        log.info("Wrote deconvolution results to %s", out)
-
-    if rankcorr and corr_rows:
-        corr_result = pd.DataFrame(corr_rows).T
-        corr_result.index.name = "sample"
-        corr_result = corr_result.sort_index(axis=1)
-        corr_path = out if out == "-" else out.replace(".tsv", "") + ".correlations.tsv"
-        if out == "-":
-            corr_result.to_csv(sys.stderr, sep="\t")
-        else:
-            corr_result.to_csv(corr_path, sep="\t")
-            log.info("Wrote correlation coefficients to %s", corr_path)
-
-    if boot_stds:
-        std_result = pd.DataFrame(boot_stds).T
-        std_result.index.name = "sample"
-        std_result = std_result.sort_index(axis=1)
-        std_result.insert(0, "fit_residual", pd.Series(residuals))
-        if out == "-":
-            log.info("Bootstrap std written to stderr only (use -O to write to file).")
-        else:
-            std_path = out.replace(".tsv", "") + ".bootstrap_std.tsv"
-            std_result.to_csv(std_path, sep="\t")
-            log.info("Wrote bootstrap std to %s", std_path)
-
-    return result
+    log.info("Wrote deconvolution results for %d sample(s).", n_rows)

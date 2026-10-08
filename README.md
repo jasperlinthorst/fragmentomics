@@ -286,7 +286,19 @@ cfstats deconv -r hg38.fa --bootstrap 100 --output sample_deconv.tsv sample.cram
 | `--no-standardize` | Do not z-score signal/reference columns before NNLS | off |
 | `--relationship` | FFT-WPS vs expression relationship: `auto`, `negative`, `positive` | auto |
 | `--bootstrap` | Gene-level bootstrap iterations for uncertainty | 0 |
+| `--amplitude-step` | Step between discrete period amplitudes (bp) | 1 (3 with `--leuven`/`--rankcorr`) |
+| `--leuven` | Leuven read selection, WPS scoring, strand orientation and spectral transform | off |
+| `--rankcorr` | Ranked-correlation output (Leuven/Kate method) instead of NNLS fractions; implies `--leuven` | off |
 | `--output`, `-O` | Output TSV path (`-` for stdout) | `-` |
+
+With `--rankcorr`, each reference cell type is Pearson-correlated against the
+per-gene FFT-WPS signal (genes observed in both, i.e. R's
+`pairwise.complete.obs`) and cell types are ranked in ascending order of
+correlation: rank 1 is the most negatively correlated (strongest contributor,
+since FFT-WPS intensity decreases with expression). The output TSV holds ranks;
+raw coefficients are written to `<output>.correlations.tsv`. This replicates
+the `cellforigin_correlations.R` step of the Leuven pipeline exactly when the
+same genes × cell-types matrix is passed via `--reference-atlas`.
 
 ### `nucs` — Nucleosome calling from WPS
 
