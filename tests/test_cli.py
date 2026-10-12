@@ -95,6 +95,56 @@ class TestArgParsing:
         finally:
             sys.argv = old_argv
 
+    def test_nipt_requires_reference_fasta(self):
+        code = self._parse(["nipt", "reference.tsv", "sample.bam", "--ff", "0.1"])
+        assert code == 2
+
+    def test_nipt_parses_regions_ratio_score_and_fixed_ff(self):
+        from cfstats.__main__ import lazy_cmd, main
+        old_argv = sys.argv
+        try:
+            sys.argv = [
+                "cfstats", "nipt", "reference.tsv", "a.bam", "b.bam",
+                "--reference", "genome.fa", "--regions", "targets.bed",
+                "--ratio-score", "--ff", "0.12", "--nproc", "2",
+            ]
+            with mock.patch.object(lazy_cmd, "__call__") as call, \
+                 mock.patch("cfstats.__main__.confirm_model_licence") as licence:
+                main()
+            args = call.call_args.args[0]
+            assert args.samfiles == ["a.bam", "b.bam"]
+            assert args.regions == "targets.bed"
+            assert args.ratio_score is True
+            assert args.ff == pytest.approx(0.12)
+            assert args.nproc == 2
+            licence.assert_not_called()
+        finally:
+            sys.argv = old_argv
+
+    def test_nipt_prediction_requires_model_licence(self):
+        from cfstats.__main__ import lazy_cmd, main
+        old_argv = sys.argv
+        try:
+            sys.argv = [
+                "cfstats", "nipt", "reference.tsv", "sample.bam",
+                "--reference", "genome.fa", "--confirm-licence",
+            ]
+            with mock.patch.object(lazy_cmd, "__call__") as call, \
+                 mock.patch("cfstats.__main__.confirm_model_licence") as licence:
+                main()
+            assert call.call_args.args[0].ff is None
+            licence.assert_called_once()
+        finally:
+            sys.argv = old_argv
+
+    @pytest.mark.parametrize("value", ["0", "-0.1", "1.1"])
+    def test_nipt_rejects_invalid_fixed_ff(self, value):
+        code = self._parse([
+            "nipt", "reference.tsv", "sample.bam", "--reference", "genome.fa",
+            "--ff", value,
+        ])
+        assert code == 2
+
     def test_dnase1l3_missing_args_exits_2(self):
         code = self._parse(["dnase1l3"])
         assert code == 2

@@ -749,11 +749,25 @@ def deconv(args):
             std_path = out.replace(".tsv", "") + ".bootstrap_std.tsv"
             std_handle = open(std_path, "w")
 
-    columns = None
-    corr_columns = None
-    std_columns = None
+    # The output schema is fixed up front from the reference atlas so that every
+    # cell type is always a column, even when a given sample cannot fit it.
+    columns = sorted(ref.columns)
+    corr_columns = columns
+    std_columns = columns
     n_rows = 0
     residuals = {}
+
+    if rankcorr:
+        out_handle.write("sample\t" + "\t".join(columns) + "\n")
+        out_handle.flush()
+        corr_handle.write("sample\t" + "\t".join(corr_columns) + "\n")
+        corr_handle.flush()
+    else:
+        out_handle.write("sample\tfit_residual\t" + "\t".join(columns) + "\n")
+        out_handle.flush()
+        if std_handle is not None:
+            std_handle.write("sample\tfit_residual\t" + "\t".join(std_columns) + "\n")
+            std_handle.flush()
 
     db = _open_gene_db(args.gfffile)
     nproc = getattr(args, "nproc", 1) or 1
@@ -763,14 +777,6 @@ def deconv(args):
         try:
             if rankcorr:
                 ranks, correlations = rank_correlate(sig, ref)
-                if columns is None:
-                    columns = sorted(ranks.index)
-                    out_handle.write("sample\t" + "\t".join(columns) + "\n")
-                    out_handle.flush()
-                if corr_columns is None:
-                    corr_columns = sorted(correlations.index)
-                    corr_handle.write("sample\t" + "\t".join(corr_columns) + "\n")
-                    corr_handle.flush()
                 _write_deconv_row(out_handle, samfile, ranks.to_dict(), columns)
                 _write_deconv_row(corr_handle, samfile, correlations.to_dict(), corr_columns)
                 n_rows += 1
@@ -785,15 +791,6 @@ def deconv(args):
         except RuntimeError as e:
             log.error("Deconvolution failed for %s: %s", samfile, e)
             return
-
-        if columns is None:
-            columns = sorted(fractions.index)
-            out_handle.write("sample\tfit_residual\t" + "\t".join(columns) + "\n")
-            out_handle.flush()
-            if std_handle is not None:
-                std_handle.write("sample\tfit_residual\t" + "\t".join(columns) + "\n")
-                std_handle.flush()
-            std_columns = columns
 
         residuals[samfile] = residual
         _write_deconv_row(out_handle, samfile, fractions.to_dict(), columns, residual=residual)

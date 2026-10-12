@@ -229,11 +229,19 @@ def main():
 
     parser_nipt = subparsers.add_parser('nipt', prog="cfstats nipt", description="Perform typical NIPT analysis", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_nipt.add_argument('referencesamples', help='Tab-separated value list in which rows are samples and columns are bincounts (matched with specified bin size)')
-    parser_nipt.add_argument('samfiles', nargs='*', help='sam/bam/cram files for which gains or deletion should be called')
-    parser_nipt.add_argument("--ff", dest="ff", type=float, default=0.10, help="Global fetal fraction to use")
+    parser_nipt.add_argument('samfiles', nargs='*', help='sam/bam/cram files for which gains or deletions should be tested')
+    parser_nipt.add_argument("--ff", dest="ff", type=float, default=None, help="Fixed global fetal fraction for all samples; predict per sample when omitted")
+    parser_nipt.add_argument("--regions", dest="regions", default=None, help="Four-column BED file of uniquely named regions to test instead of whole contigs")
+    parser_nipt.add_argument("--ratio-score", dest="ratio_score", action="store_true", default=False, help="Report direction-specific mosaic ratio scores")
+    parser_nipt.add_argument("--model", dest="model", default=get_model_path('ffpredictor_50kautosomalbins.pickle'), help="Regression model used to predict fetal fraction when --ff is omitted")
+    parser_nipt.add_argument('--confirm-licence', dest='confirm_licence', action='store_true', default=False, help='Confirm acceptance of the fetal-fraction model licence (non-commercial, research-only use).')
+    parser_nipt.add_argument('--hf-token', dest='hf_token', default=None, help='Hugging Face token for remote FF prediction when --ff is omitted.')
+    parser_nipt.add_argument('--min-ff', dest='min_ff', default=0.01, type=float, help='Minimum predicted fetal fraction.')
+    parser_nipt.add_argument('--max-ff', dest='max_ff', default=1.0, type=float, help='Maximum predicted fetal fraction.')
     parser_nipt.add_argument("-b", "--binsize", dest="binsize", type=int, default=1000000, help="Size of the bins.")
     parser_nipt.add_argument("--gccorrect", dest="gccorrect", action="store_true", default=False, help="Apply GC content correction before normalisation and calling")
-    parser_nipt.set_defaults(func=lazy_cmd('nipt', 'nipt'))
+    parser_nipt.add_argument("--frac", dest="frac", type=float, default=0.1, help="GC smoothing parameter, fraction of the data used for fitting.")
+    parser_nipt.set_defaults(func=lazy_cmd('nipt', 'nipt'), requires_ff_licence=True)
 
     parser_fragmentome = subparsers.add_parser('fragmentome', prog="cfstats fragmentome", description="Start interactive fragmentome explorer web application (data is loaded from ClickHouse)", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
     parser_fragmentome.add_argument('--mapping', dest='mapping', default=None, help='Pickled (reducer, embedding, k) mapping as produced/used by cfstats dnase1l3 plot. Required for upload-to-embedding functionality.')
@@ -303,6 +311,10 @@ def main():
 
     if hasattr(args, 'samfiles') and not args.samfiles and not args.bamlist:
         parser.error("No input alignment files provided. Provide sam/bam/cram files as positional arguments or via --bamlist.")
+    if getattr(args, 'requires_ff_licence', False) and args.reference is None:
+        parser.error("cfstats nipt requires -r/--reference.")
+    if getattr(args, 'requires_ff_licence', False) and args.ff is not None and not 0 < args.ff <= 1:
+        parser.error("--ff must be greater than 0 and at most 1.")
 
     cli_tokens = sys.argv[1:]
     args._explicit_filters = {
@@ -319,7 +331,9 @@ def main():
 
     if hasattr(args, 'func'):
         random.seed(args.seed)
-        if getattr(args, 'requires_licence', False):
+        if getattr(args, 'requires_licence', False) or (
+            getattr(args, 'requires_ff_licence', False) and args.ff is None
+        ):
             confirm_model_licence(args)
         #try:
         args.func(args)
