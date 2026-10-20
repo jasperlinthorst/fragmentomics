@@ -189,6 +189,9 @@ def main():
     parser_nucs.add_argument('--max-len', dest='max_len', type=int, default=180, help='Maximum fragment length to include')
     parser_nucs.add_argument('--min-prominence', dest='min_prominence', type=float, default=5.0, help='Minimum WPS peak prominence for nucleosome calling')
     parser_nucs.add_argument('--min-distance', dest='min_distance', type=int, default=147, help='Minimum distance between nucleosome peaks (bp)')
+    parser_nucs.add_argument('--rel-height', dest='rel_height', type=float, default=0.5, help='Nucleosome boundaries are set where the WPS drops below this fraction of the peak prominence, measured from the summit (0.5 = full width at half prominence; 1.0 = down to the peak base).')
+    parser_nucs.add_argument('--wps-out', dest='wps_out', default=None, help='Also write the aggregated bp-resolution WPS track to this file, e.g. for IGV. Format is inferred from the extension: .bedGraph, .bedGraph.gz, or .bw (requires pyBigWig).')
+    parser_nucs.add_argument('--chunk-size', dest='chunk_size', type=int, default=1000000, help='Process regions in chunks of this many bp to bound memory usage.')
     parser_nucs.set_defaults(func=lazy_cmd('nucs', 'nucs'))
 
     parser_gcbias = subparsers.add_parser('gcbias', prog="cfstats gcbias", description="Estimate per-sample GC-bias correction table (length x num_GC) for use by 'siteprofile'. Run once per sample before 'siteprofile'.", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
