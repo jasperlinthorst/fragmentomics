@@ -120,6 +120,49 @@ def collect_bam_files(samfiles, bamlist=None):
     return files
 
 
+class StatsWriter:
+    """Write per-sample feature vectors in wide (default) or long (--long) form.
+
+    Wide form (unchanged behaviour): one row per sample, one column per
+    feature; an optional header line is written once.
+
+    Long form (--long): one ``filename<TAB>feature<TAB>value`` line per
+    feature so every row remains attributable to its sample.  With
+    ``--noname`` the filename column is dropped in both modes.
+    """
+
+    def __init__(self, args, handle=None, header=None):
+        self.handle = handle if handle is not None else sys.stdout
+        self.name = getattr(args, "name", True)
+        self.long = getattr(args, "long", False)
+        self.header = getattr(args, "header", False) if header is None else header
+        self._header_done = False
+
+    def write(self, samfile, labels, values):
+        """Write one sample's feature vector (labels/values aligned)."""
+        values = [str(v) for v in values]
+        if self.long:
+            if self.header and not self._header_done:
+                cols = ["feature", "value"]
+                if self.name:
+                    cols.insert(0, "filename")
+                self.handle.write("\t".join(cols) + "\n")
+            self._header_done = True
+            prefix = (str(samfile) + "\t") if self.name else ""
+            for label, value in zip(labels, values):
+                self.handle.write(f"{prefix}{label}\t{value}\n")
+        else:
+            if self.header and not self._header_done:
+                cols = [str(l) for l in labels]
+                if self.name:
+                    cols.insert(0, "filename")
+                self.handle.write("\t".join(cols) + "\n")
+            self._header_done = True
+            prefix = (str(samfile) + "\t") if self.name else ""
+            self.handle.write(prefix + "\t".join(values) + "\n")
+        self.handle.flush()
+
+
 def require_sample_names(args):
     """Raise if multiprocessing is requested without sample-name prefixes.
 

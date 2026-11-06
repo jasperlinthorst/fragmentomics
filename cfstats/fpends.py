@@ -4,10 +4,11 @@ import sys
 
 
 from cfstats import utils
-from cfstats.utils import collect_bam_files
+from cfstats.utils import collect_bam_files, allk, allkp, nuc2purpyr
 
 from logging import log
 import numpy as np
+import pandas as pd
 from multiprocessing import Pool
 
 
@@ -93,7 +94,7 @@ def _5pends(args, cmdline=True):
     utils.require_sample_names(args)
 
     v={}
-    header_written = False
+    writer = utils.StatsWriter(args) if cmdline else None
 
     def _iter_results():
         payload = zip(args.samfiles, [args]*len(args.samfiles))
@@ -121,18 +122,7 @@ def _5pends(args, cmdline=True):
             v[samfile] = f
             continue
 
-        if args.header and not header_written:
-            if args.name:
-                sys.stdout.write("filename\t")
-            sys.stdout.write("\t".join(map(str, list(d.keys()))) + "\n")
-            sys.stdout.flush()
-            header_written = True
-
-        if args.name:
-            sys.stdout.write(samfile + "\t")
-
-        sys.stdout.write("\t".join(map(str, f)) + "\n")
-        sys.stdout.flush()
+        writer.write(samfile, list(d.keys()), f)
 
     if not cmdline:
         return [v[s] for s in args.samfiles]
@@ -141,12 +131,10 @@ def _5pendsbysize(args, cmdline=True):
     
     args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
 
+    writer = utils.StatsWriter(args, header=True) if cmdline else None
+    revcomptable = str.maketrans("acgtACGT", "tgcaTGCA")
+
     k=args.k
-    
-    if args.purpyr:
-        d={k:{i:0 for i in range(args.lower,args.upper)} for k in allkp(k,onlylexsmallest=args.uselexsmallest)}
-    else:
-        d={k:{i:0 for i in range(args.lower,args.upper)} for k in allk(k,onlylexsmallest=args.uselexsmallest)}        
 
     if args.useref:
         if args.reference==None:
@@ -154,6 +142,11 @@ def _5pendsbysize(args, cmdline=True):
         fasta=pysam.FastaFile(args.reference)
 
     for samfile in args.samfiles:
+        if args.purpyr:
+            d={k:{i:0 for i in range(args.lower,args.upper)} for k in allkp(k,onlylexsmallest=args.uselexsmallest)}
+        else:
+            d={k:{i:0 for i in range(args.lower,args.upper)} for k in allk(k,onlylexsmallest=args.uselexsmallest)}
+
         cram=pysam.AlignmentFile(samfile,reference_filename=args.reference)
         
         
@@ -214,4 +207,10 @@ def _5pendsbysize(args, cmdline=True):
                             pass
         
         m=pd.DataFrame(d)
-        m.T.to_csv(sys.stdout,sep="\t",index=True)
+        labels=[]
+        vals=[]
+        for motif in m.columns:
+            for size in m.index:
+                labels.append(f"{motif}_{size}")
+                vals.append(m.loc[size,motif])
+        writer.write(samfile, labels, vals)

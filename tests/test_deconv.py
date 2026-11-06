@@ -1,6 +1,7 @@
 """Tests for cfstats deconv: FFT-WPS intensity helper, reference parsing,
 and the NNLS deconvolution math."""
 
+import io
 import os
 
 import numpy as np
@@ -35,6 +36,49 @@ class TestFftWpsIntensity:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+class TestReferenceLoading:
+    def test_default_uses_packaged_tissue_matrix_without_cache(self, monkeypatch):
+        from types import SimpleNamespace
+        from cfstats import deconv
+
+        monkeypatch.setattr(deconv, '_cache_dir', lambda: pytest.fail('Default must not need a cache'))
+        monkeypatch.setattr(deconv, '_download', lambda *args: pytest.fail('Default must not download'))
+        ref = deconv.load_reference(SimpleNamespace())
+        assert ref.shape == (19620, 465)
+        assert all(dtype == np.dtype('float32') for dtype in ref.dtypes)
+        assert all(' ' not in name for name in ref.columns)
+        assert np.isfinite(ref.to_numpy()).all()
+        assert (ref.to_numpy() < 0).all()
+        assert ref.columns[0] == 'placenta.VCT'
+
+    def test_explicit_matrix_overrides_default_and_url(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+        from cfstats import deconv
+
+        path = tmp_path / 'custom.tsv'
+        expected = pd.DataFrame({'custom': [1., 2.]}, index=['ENSG1', 'ENSG2'])
+        expected.to_csv(path, sep='\t')
+        monkeypatch.setattr(deconv, '_cache_dir', lambda: pytest.fail('Prebuilt matrix must not need a cache'))
+        actual = deconv.load_reference(SimpleNamespace(reference_atlas=str(path), atlas_url='custom.h5ad'))
+        pd.testing.assert_frame_equal(actual, expected.rename_axis('ENSG'))
+
+    def test_explicit_url_still_downloads_and_aggregates(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+        from cfstats import deconv
+        from unittest.mock import Mock
+
+        monkeypatch.setattr(deconv, '_cache_dir', lambda: str(tmp_path))
+        download = Mock()
+        aggregate = Mock(return_value=pd.DataFrame({'custom': [1.]}))
+        monkeypatch.setattr(deconv, '_download', download)
+        monkeypatch.setattr(deconv, '_build_or_load_pseudobulk', aggregate)
+        url = 'https://example.org/custom.h5ad'
+        actual = deconv.load_reference(SimpleNamespace(atlas_url=url))
+        download.assert_called_once_with(url, str(tmp_path / 'custom.h5ad'))
+        aggregate.assert_called_once_with(str(tmp_path / 'custom.h5ad'), str(tmp_path), None, 10, 20000, False)
+        assert actual is aggregate.return_value
+
 
 class TestHelpers:
     def test_strip_gene_version(self):
@@ -202,7 +246,112 @@ class TestRankCorrelate:
 # CLI registration
 # ---------------------------------------------------------------------------
 
+class TestNnlsOutput:
+    @pytest.mark.parametrize('long_output', [False, True])
+    @pytest.mark.parametrize('bootstrap', [False, True])
+    def test_contribution_order_per_sample(self, long_output, bootstrap, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+        from cfstats import deconv
+
+        columns = ['low', 'high', 'tie', 'missing']
+        ref = pd.DataFrame(columns=columns)
+        monkeypatch.setattr(deconv, 'load_reference', lambda args: ref)
+        monkeypatch.setattr(deconv, '_open_gene_db', lambda path: [])
+        monkeypatch.setattr(deconv, 'compute_sample_fftwps',
+                            lambda samfile, args, db: samfile)
+        def fit(sample, ref, **kwargs):
+            fractions = [0.1, 0.45, 0.45] if sample == 's1.bam' else [0.7, 0.2, 0.1]
+            std = pd.Series([0.11, 0.22, 0.33], index=columns[:3]) if bootstrap else None
+            return pd.Series(fractions, index=columns[:3]), 0.5, std
+        monkeypatch.setattr(deconv, 'deconvolve', fit)
+        output = tmp_path / 'result.tsv'
+        args = SimpleNamespace(samfiles=['s1.bam', 's2.bam'], output=str(output),
+                               long=long_output, gfffile='unused', no_standardize=False,
+                               n_bootstrap=int(bootstrap))
+        deconv.deconv(args)
+        paths = [output]
+        if bootstrap:
+            paths.append(tmp_path / 'result.bootstrap_std.tsv')
+        for path in paths:
+            table = pd.read_csv(path, sep='\t')
+            if long_output:
+                for sample, order in [('s1.bam', ['high', 'tie', 'low', 'missing']),
+                                      ('s2.bam', columns)]:
+                    rows = table[table['sample'] == sample]
+                    assert rows['feature'].tolist() == ['fit_residual'] + order
+                    assert pd.isna(rows.iloc[-1]['value'])
+            else:
+                assert table.columns.tolist() == ['sample', 'fit_residual'] + columns
+            if path == output:
+                if long_output:
+                    contributions = table[table['feature'].isin(columns)].groupby('sample')['value']
+                    assert all(values.dropna().is_monotonic_decreasing for _, values in contributions)
+                else:
+                    assert table.iloc[0]['low'] == pytest.approx(0.1)
+                    assert table.iloc[1]['low'] == pytest.approx(0.7)
+
+
+class TestCorrelationOutput:
+    @pytest.mark.parametrize('mode', ['rank', 'corr', 'rankcorr', 'rank+corr'])
+    @pytest.mark.parametrize('long_output', [False, True])
+    @pytest.mark.parametrize('stdout', [False, True])
+    def test_single_output_order_and_labels(self, mode, long_output, stdout,
+                                           tmp_path, monkeypatch, capsys):
+        from types import SimpleNamespace
+        from cfstats import deconv
+
+        genes = [f'ENSG{i:011d}' for i in range(20)]
+        signal = pd.Series(np.arange(20), index=genes)
+        ref = pd.DataFrame({'z_type': signal, 'a_type': -signal}, index=genes)
+        monkeypatch.setattr(deconv, 'load_reference', lambda args: ref)
+        monkeypatch.setattr(deconv, '_open_gene_db', lambda path: [])
+        monkeypatch.setattr(deconv, 'compute_sample_fftwps',
+                            lambda samfile, args, db: signal)
+        output = tmp_path / 'result.tsv'
+        args = SimpleNamespace(
+            samfiles=['s1.bam', 's2.bam'], rank=mode in ('rank', 'rank+corr'),
+            corr=mode in ('corr', 'rank+corr'), rankcorr=mode == 'rankcorr',
+            leuven=False, output='-' if stdout else str(output),
+            long=long_output, gfffile='unused', n_bootstrap=10)
+        deconv.deconv(args)
+        captured = capsys.readouterr()
+        text = captured.out if stdout else output.read_text()
+        assert captured.err == ''
+        assert list(tmp_path.iterdir()) == ([] if stdout else [output])
+        assert args.leuven is True
+        kinds = ['rank', 'corr'] if mode in ('rankcorr', 'rank+corr') else [mode]
+        if long_output:
+            result = pd.read_csv(io.StringIO(text), sep='\t')
+            assert result.columns.tolist() == ['sample', 'feature', 'value']
+            for sample in args.samfiles:
+                rows = result[result['sample'] == sample]
+                assert rows['feature'].tolist() == [
+                    f'{cell}.{kind}' for cell in ['a_type', 'z_type'] for kind in kinds]
+                for kind in kinds:
+                    assert rows.loc[rows['feature'].str.endswith(f'.{kind}'), 'value'].is_monotonic_increasing
+        else:
+            result = pd.read_csv(io.StringIO(text), sep='\t', index_col=0)
+            assert result.index.tolist() == args.samfiles
+            assert result.columns.tolist() == [
+                f'{cell}.{kind}' for cell in ref.columns for kind in kinds]
+        values = dict(zip(result['feature'], result['value'])) if long_output else result.iloc[0].to_dict()
+        for kind in kinds:
+            assert values[f'a_type.{kind}'] == pytest.approx(1 if kind == 'rank' else -1)
+            assert values[f'z_type.{kind}'] == pytest.approx(2 if kind == 'rank' else 1)
+
+
 class TestCli:
+    @pytest.mark.parametrize('flag', ['--rank', '--corr', '--rankcorr'])
+    def test_correlation_flags(self, flag, monkeypatch):
+        from unittest.mock import patch
+        from cfstats.__main__ import main, lazy_cmd
+        monkeypatch.setattr('sys.argv', ['cfstats', 'deconv', 'x.bam', flag, '--long'])
+        with patch.object(lazy_cmd, '__call__') as call:
+            main()
+        args = call.call_args.args[0]
+        assert getattr(args, flag[2:]) is True
+        assert args.long is True
+
     def test_deconv_missing_args_exits_2(self):
         import sys
         from cfstats.__main__ import main

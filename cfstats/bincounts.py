@@ -128,32 +128,20 @@ def iter_bincounts(args):
 def bincounts(args, cmdline=True):
     V={}
     reflabels=[]
+    writer = utils.StatsWriter(args) if cmdline else None
 
     for reflabels, samfile, v in iter_bincounts(args):
-        if cmdline and args.header and not V:
-            if args.name:
-                sys.stdout.write("filename\t")
-            sys.stdout.write("\t".join(reflabels)+"\n")
-            sys.stdout.flush()
-
         V[samfile] = v
         if not cmdline:
             continue
 
-        if args.name:
-            sys.stdout.write(samfile+"\t")
         if args.norm=='freq':
-            vnorm=(np.array(v)/v.sum()).astype(np.float64)
-            sys.stdout.write("\t".join(map(str,vnorm))+"\n")
+            v=(np.array(v)/v.sum()).astype(np.float64)
         elif args.norm=='rpx':
-            if np.nansum(v)==0:
-                vnorm=v
-            else:
-                vnorm=(np.array(v)/(np.nansum(v)/args.x)).astype(np.uint32)
-            sys.stdout.write("\t".join(map(str,vnorm))+"\n")
-        else:
-            sys.stdout.write("\t".join(map(str,v))+"\n")
-        sys.stdout.flush()
+            if np.nansum(v)!=0:
+                v=(np.array(v)/(np.nansum(v)/args.x)).astype(np.uint32)
+
+        writer.write(samfile, reflabels, v)
 
     if not cmdline:
         return reflabels, np.array([V[s] for s in args.samfiles])

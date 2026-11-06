@@ -77,7 +77,7 @@ def cleavesitemotifs(args, cmdline=True):
     utils.require_sample_names(args)
 
     v={}
-    header_written = False
+    writer = utils.StatsWriter(args) if cmdline else None
 
     def _iter_results():
         payload = zip(args.samfiles, [args]*len(args.samfiles))
@@ -105,18 +105,7 @@ def cleavesitemotifs(args, cmdline=True):
             v[samfile] = f
             continue
 
-        if args.header and not header_written:
-            if args.name:
-                sys.stdout.write("filename\t")
-            sys.stdout.write("\t".join(map(str, list(d.keys()))) + "\n")
-            sys.stdout.flush()
-            header_written = True
-
-        if args.name:
-            sys.stdout.write(samfile + "\t")
-
-        sys.stdout.write("\t".join(map(str, f)) + "\n")
-        sys.stdout.flush()
+        writer.write(samfile, list(d.keys()), f)
 
     if not cmdline:
         return [v[s] for s in args.samfiles]
@@ -204,6 +193,8 @@ def cleavesitemotifsbysize(args, cmdline=True):
     
     args.samfiles = utils.collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
 
+    writer = utils.StatsWriter(args, header=True) if cmdline else None
+
     for samfile in args.samfiles:
         if args.reference==None:
             raise ValueError("Reference file is required.")
@@ -266,4 +257,10 @@ def cleavesitemotifsbysize(args, cmdline=True):
                         pass
                 
         m=pd.DataFrame(d)
-        m.T.to_csv(sys.stdout,sep="\t",index=True)
+        labels=[]
+        vals=[]
+        for motif in m.columns:
+            for size in m.index:
+                labels.append(f"{motif}_{size}")
+                vals.append(m.loc[size,motif])
+        writer.write(samfile, labels, vals)

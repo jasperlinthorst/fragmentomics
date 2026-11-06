@@ -68,6 +68,7 @@ def main():
     global_parser.add_argument("-o", dest="maxo", default=None, type=int, help="Limit stats to maxo observations.")
     global_parser.add_argument("--header", dest="header", action="store_true", default=False, help="Write header for names of features")
     global_parser.add_argument("--noname", dest="name", action="store_false", default=True, help="Do not prefix tab-separated values with the name of the file")
+    global_parser.add_argument("--long", dest="long", action="store_true", default=False, help="Report statistics in long form: one 'filename feature value' line per feature instead of one row per sample (wide form is the default).")
     global_parser.add_argument("-r", "--reference", dest="reference", default=None, type=str, help="Reference file for: reference depended features cleave-site motifs/binned counts/cram decoding.")
     global_parser.add_argument("--seed", dest="seed", default=42, type=int, help="Seed for random number generator.")
     global_parser.add_argument("--bamlist", dest="bamlist", type=str, default=None, help="File containing a list of sam/bam/cram files (one per line).")
@@ -147,6 +148,15 @@ def main():
     parser_plot.set_defaults(func=lazy_cmd('dnase1l3', 'plot_fragmentome'))
 
     parser_fourier = subparsers.add_parser('fourier', prog="cfstats fourier", description="Extract Fourier transformed coverage profile for each gene", formatter_class=argparse.ArgumentDefaultsHelpFormatter, parents=[global_parser])
+    # fourier predates the global --long flag with its own --long/--wide
+    # semantics; drop the inherited global --long (without mutating the shared
+    # parent action, which conflict_handler="resolve" would do) so that
+    # fourier's own --long below wins.
+    for _container in (parser_fourier._actions, parser_fourier._optionals._group_actions):
+        for _action in list(_container):
+            if _action.dest == 'long' and '--long' in _action.option_strings:
+                _container.remove(_action)
+    parser_fourier._option_string_actions.pop('--long', None)
     parser_fourier.add_argument('samfiles', nargs='*', help='sam/bam/cram file')
     parser_fourier.add_argument('--genemodel', dest='gfffile', default=DEFAULT_GENE_MODEL, help='Gene annotation (GFF/GTF or five-column gene body TSV)')
     parser_fourier.add_argument('-w', dest='window', default=10000, help='Size of the gene body which whould be transformed')
@@ -164,11 +174,13 @@ def main():
     parser_deconv.add_argument('-w', dest='window', default=10000, type=int, help='Size of the gene body window that is Fourier transformed.')
     parser_deconv.add_argument('--amplitude-min', dest='ampmin', default=193, type=float, help='Lower bound (bp) of the nucleosome-spacing period band.')
     parser_deconv.add_argument('--amplitude-max', dest='ampmax', default=199, type=float, help='Upper bound (bp) of the nucleosome-spacing period band.')
-    parser_deconv.add_argument('--amplitude-step', dest='ampstep', default=None, type=int, help='Step size (bp) between discrete period amplitudes. With --leuven/--rankcorr the preset is 3 unless explicitly overridden.')
+    parser_deconv.add_argument('--amplitude-step', dest='ampstep', default=None, type=int, help='Step size (bp) between discrete period amplitudes. With --leuven, --rank, --corr or --rankcorr the preset is 3 unless explicitly overridden.')
     parser_deconv.add_argument('--leuven', dest='leuven', action='store_true', default=False, help='Use Leuven read selection, WPS scoring, strand orientation, and spectral transform for the per-gene FFT-WPS signal.')
-    parser_deconv.add_argument('--rankcorr', dest='rankcorr', action='store_true', default=False, help='Ranked-correlation output (Leuven/Kate method): Pearson-correlate the per-gene FFT-WPS signal against each reference cell type and output ranks (1 = lowest/most-negative correlation = strongest contribution) instead of NNLS fractions. Implies --leuven. Also writes <output>.correlations.tsv with the raw coefficients.')
-    parser_deconv.add_argument('--reference-atlas', dest='reference_atlas', default=None, help='Local reference: an .h5ad single-cell atlas, or a pre-built genes x cell-types matrix (.parquet/.tsv/.csv). If omitted, the atlas is downloaded/cached under the hood.')
-    parser_deconv.add_argument('--atlas-url', dest='atlas_url', default=None, help='URL to download the single-cell atlas .h5ad from (default: Tabula Sapiens on cellxgene).')
+    parser_deconv.add_argument('--rank', dest='rank', action='store_true', default=False, help='Output cell-type ranks (1 = lowest/most-negative Pearson correlation) instead of NNLS fractions. Implies --leuven. Features end in .rank; --long sorts by rank, otherwise atlas column order is preserved.')
+    parser_deconv.add_argument('--corr', dest='corr', action='store_true', default=False, help='Output Pearson correlation coefficients instead of NNLS fractions. Implies --leuven. Features end in .corr; --long sorts by rank, otherwise atlas column order is preserved.')
+    parser_deconv.add_argument('--rankcorr', dest='rankcorr', action='store_true', default=False, help='Output both ranks and Pearson correlations in one file, equivalent to --rank --corr. Implies --leuven. Features end in .rank or .corr; --long sorts by rank, otherwise atlas column order is preserved.')
+    parser_deconv.add_argument('--reference-atlas', dest='reference_atlas', default=None, help='Local reference: an .h5ad single-cell atlas, or a pre-built genes x cell-types matrix (.parquet/.tsv/.csv). Defaults to the bundled log2-transformed float32 cellxgene Tabula Sapiens/trophoblast tissue matrix (465 cell types), unless --atlas-url is supplied.')
+    parser_deconv.add_argument('--atlas-url', dest='atlas_url', default=None, help='Download and cache an alternative single-cell .h5ad atlas instead of using the bundled reference. --reference-atlas takes precedence.')
     parser_deconv.add_argument('--cell-type-col', dest='cell_type_col', default=None, help='Name of the .obs column holding cell-type labels (auto-detected if omitted).')
     parser_deconv.add_argument('--min-cells', dest='min_cells', default=10, type=int, help='Minimum number of cells for a cell type to be included in the reference.')
     parser_deconv.add_argument('--chunk-size', dest='chunk_size', default=20000, type=int, help='Number of cells per chunk when streaming a large .h5ad atlas (lower this if the reference build runs out of memory).')

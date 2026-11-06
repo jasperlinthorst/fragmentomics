@@ -7,7 +7,7 @@ import sys
 import logging
 
 from cfstats import csm, fszd, fpends
-from cfstats.utils import collect_bam_files
+from cfstats.utils import collect_bam_files, StatsWriter
 import os
 
 import joblib
@@ -58,8 +58,9 @@ def dnase1l3(args, cmdline=True):
         probs = clf_svc.predict_proba(f)
 
     if cmdline:
+        writer = StatsWriter(args)
         for smp, pred, prob in zip(args.samfiles, preds, probs):
-            sys.stdout.write(f"{smp}\t{pred}\t{prob[1]:.4f}\n")
+            writer.write(smp, ["prediction", "probability"], [pred, f"{prob[1]:.4f}"])
     else:
         return preds, probs
 

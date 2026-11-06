@@ -167,23 +167,23 @@ def nipt(args):
     samples = samples.loc[:, reference.columns]
     samples = samples.div(samples.sum(axis=1), axis=0)
 
-    fields = ["filename", "FF"]
+    fields = ["FF"]
     for target in targets:
         fields.extend((f"{target}_Zscore", f"{target}_gain_LLR", f"{target}_deletion_LLR"))
         if args.ratio_score:
             fields.extend((f"{target}_gain_MR", f"{target}_deletion_MR"))
-    sys.stdout.write("\t".join(fields) + "\n")
+
+    writer = utils.StatsWriter(args, header=True)
 
     null = reference.mean()
     std = reference.std()
     for sample_name, sample in samples.iterrows():
-        row = [sample_name, str(fetal_fractions[sample_name])]
+        row = [fetal_fractions[sample_name]]
         for mask in targets.values():
             scores = calc_target_scores(
                 sample, null, std, mask, fetal_fractions[sample_name], args.ratio_score
             )
-            row.extend((str(scores["Zscore"]), str(scores["gain_LLR"]), str(scores["deletion_LLR"])))
+            row.extend((scores["Zscore"], scores["gain_LLR"], scores["deletion_LLR"]))
             if args.ratio_score:
-                row.extend((str(scores["gain_MR"]), str(scores["deletion_MR"])))
-        sys.stdout.write("\t".join(row) + "\n")
-        sys.stdout.flush()
+                row.extend((scores["gain_MR"], scores["deletion_MR"]))
+        writer.write(sample_name, fields, row)

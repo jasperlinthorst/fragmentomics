@@ -318,11 +318,13 @@ def fourier_transform_coverage(args):
     logger = log_module.getLogger("cfstats.fourier")
     args.samfiles = utils.collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
     output_format = _choose_output_format(args)
-    args._return_periods = (output_format == 'long')
+    # Multi-sample long output melts to filename/gene/value rows; the
+    # single-sample gene x period table is only kept for the one-sample case.
+    melt_long = output_format == 'long' and len(args.samfiles) > 1
+    args._return_periods = output_format == 'long' and not melt_long
 
-    if output_format == 'long' and len(args.samfiles) != 1:
-        raise ValueError(
-            "--long requires exactly one BAM/CRAM file; use --wide for multiple samples")
+    if output_format == 'long' and len(args.samfiles) == 0:
+        raise ValueError("--long requires at least one BAM/CRAM file")
 
     if getattr(args, "leuven", False):
         explicit_options = getattr(args, '_explicit_options', {})
@@ -345,12 +347,30 @@ def fourier_transform_coverage(args):
             else:
                 setattr(args, attribute, preset)
 
-    if output_format == 'long':
+    if output_format == 'long' and not melt_long:
         result = worker_fourier_transform_samfile((args.samfiles[0], args))
         periods = _output_periods(args)
         sys.stdout.write("#Region\t" + "\t".join(map(str, periods)) + "\n")
         for gene, values in result['fft'].items():
             sys.stdout.write(gene + "\t" + "\t".join(map(str, values)) + "\n")
+        return
+
+    if melt_long:
+        utils.require_sample_names(args)
+        writer = utils.StatsWriter(args)
+        if args.nproc > 1:
+            with Pool(args.nproc) as pool:
+                iterator = pool.imap_unordered(
+                    worker_fourier_transform_samfile,
+                    zip(args.samfiles, [args] * len(args.samfiles)))
+        else:
+            iterator = (worker_fourier_transform_samfile((samfile, args))
+                        for samfile in args.samfiles)
+
+        for result in iterator:
+            writer.write(result['samfile'],
+                         list(result['fft'].keys()),
+                         list(result['fft'].values()))
         return
 
     # wide format: samples as rows, genes as columns

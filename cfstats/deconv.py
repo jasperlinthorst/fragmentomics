@@ -13,10 +13,11 @@ fragmentation profiles reveal disease biology*):
   mixture (non-negative least squares) and normalising yields the fractional
   contribution of each cell type to the cfDNA pool.
 
-The reference single-cell atlas is downloaded and cached under the hood
-(``~/.cache/cfstats/deconv/``). The download URL is configurable via
-``--atlas-url`` and any local ``.h5ad`` / pre-built matrix can be supplied via
-``--reference-atlas``.
+The default reference is the bundled log2-transformed cellxgene Tabula Sapiens
+and trophoblast tissue matrix. Any local ``.h5ad`` / pre-built matrix can be
+supplied via ``--reference-atlas``. An explicit ``--atlas-url`` downloads an
+alternative single-cell atlas and caches its pseudobulk matrix under
+``~/.cache/cfstats/deconv/``.
 """
 
 from __future__ import annotations
@@ -36,6 +37,10 @@ from cfstats.ft import wps, fft_wps_intensity
 from cfstats.utils import collect_bam_files
 
 log = logging.getLogger("cfstats.deconv")
+
+DEFAULT_REFERENCE_ATLAS = os.path.join(
+    os.path.dirname(__file__), "reference",
+    "cellxgene_tabsap_trophoblasts_tissues.log2.parquet")
 
 # Tabula Sapiens dataset used in the exploratory notebooks (cellxgene). The
 # download URL is only a *default*; the user can override it with --atlas-url or
@@ -305,26 +310,27 @@ def load_reference(args):
 
     Resolution order:
       1. ``--reference-atlas`` local path (.h5ad or pre-built matrix).
-      2. cached pseudobulk parquet in the cache dir.
-      3. download atlas from ``--atlas-url`` (default: Tabula Sapiens), aggregate
-         and cache.
+      2. Explicit ``--atlas-url``: download, aggregate and cache the atlas.
+      3. Bundled log2-transformed float32 tissue reference (no download/cache).
     """
     ref_arg = getattr(args, "reference_atlas", None)
     cell_type_col = getattr(args, "cell_type_col", None)
     min_cells = getattr(args, "min_cells", 10)
     chunk_size = getattr(args, "chunk_size", 20000) or 20000
     rebuild = getattr(args, "rebuild_reference", False)
-    cache = _cache_dir()
+    url = getattr(args, "atlas_url", None)
+    if ref_arg is None and not url:
+        ref_arg = DEFAULT_REFERENCE_ATLAS
 
     if ref_arg is not None:
         if not os.path.exists(ref_arg):
             raise RuntimeError(f"--reference-atlas not found: {ref_arg}")
         if ref_arg.endswith((".h5ad",)):
             return _build_or_load_pseudobulk(
-                ref_arg, cache, cell_type_col, min_cells, chunk_size, rebuild)
+                ref_arg, _cache_dir(), cell_type_col, min_cells, chunk_size, rebuild)
         return _read_prebuilt_matrix(ref_arg)
 
-    url = getattr(args, "atlas_url", None) or DEFAULT_ATLAS_URL
+    cache = _cache_dir()
     atlas_path = os.path.join(cache, os.path.basename(url.split("?")[0]))
     if not os.path.exists(atlas_path):
         _download(url, atlas_path)
@@ -697,14 +703,28 @@ def _apply_leuven_presets(args, logger):
 # CLI entry point
 # ---------------------------------------------------------------------------
 
-def _write_deconv_row(handle, samfile, values, columns, residual=None):
-    """Write one TSV row from a dict/Series of per-cell-type values."""
+def _write_deconv_row(handle, samfile, values, columns, residual=None, long=False):
+    """Write one TSV row from a dict/Series of per-cell-type values.
+
+    Wide form (default): ``samfile<TAB>[residual]<TAB>v1<TAB>v2...``
+    Long form (--long): one ``samfile<TAB>feature<TAB>value`` line per value.
+    """
+    def _fmt(val):
+        return "nan" if val is None or (isinstance(val, float) and np.isnan(val)) else str(val)
+
+    if long:
+        if residual is not None:
+            handle.write(f"{samfile}\tfit_residual\t{residual}\n")
+        for col in columns:
+            handle.write(f"{samfile}\t{col}\t{_fmt(values.get(col))}\n")
+        handle.flush()
+        return
+
     parts = [samfile]
     if residual is not None:
         parts.append(str(residual))
     for col in columns:
-        val = values.get(col)
-        parts.append("nan" if val is None or (isinstance(val, float) and np.isnan(val)) else str(val))
+        parts.append(_fmt(values.get(col)))
     handle.write("\t".join(parts) + "\n")
     handle.flush()
 
@@ -723,8 +743,10 @@ def deconv(args):
     """
     args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
 
-    rankcorr = bool(getattr(args, "rankcorr", False))
-    if rankcorr or getattr(args, "leuven", False):
+    output_rank = bool(getattr(args, "rank", False) or getattr(args, "rankcorr", False))
+    output_corr = bool(getattr(args, "corr", False) or getattr(args, "rankcorr", False))
+    correlation_output = output_rank or output_corr
+    if correlation_output or getattr(args, "leuven", False):
         # rankcorr replicates the Kate pipeline, which uses Leuven read
         # selection, WPS scoring, strand orientation and the 193/196/199 bp
         # spectral band (amplitude step 3).
@@ -736,32 +758,32 @@ def deconv(args):
     out = getattr(args, "output", "-") or "-"
 
     out_handle = sys.stdout if out == "-" else open(out, "w")
-    corr_handle = None
     std_handle = None
-    if rankcorr:
-        if out == "-":
-            corr_handle = sys.stderr
-        else:
-            corr_path = out.replace(".tsv", "") + ".correlations.tsv"
-            corr_handle = open(corr_path, "w")
-    elif n_bootstrap > 0:
+    if not correlation_output and n_bootstrap > 0:
         if out != "-":
             std_path = out.replace(".tsv", "") + ".bootstrap_std.tsv"
             std_handle = open(std_path, "w")
 
     # The output schema is fixed up front from the reference atlas so that every
     # cell type is always a column, even when a given sample cannot fit it.
-    columns = sorted(ref.columns)
-    corr_columns = columns
+    columns = list(ref.columns)
+    kinds = [kind for kind, enabled in (("rank", output_rank), ("corr", output_corr)) if enabled]
+    feature_columns = [f"{cell}.{kind}" for cell in columns for kind in kinds]
     std_columns = columns
     n_rows = 0
     residuals = {}
 
-    if rankcorr:
-        out_handle.write("sample\t" + "\t".join(columns) + "\n")
+    long_output = bool(getattr(args, "long", False))
+
+    if long_output:
+        out_handle.write("sample\tfeature\tvalue\n")
         out_handle.flush()
-        corr_handle.write("sample\t" + "\t".join(corr_columns) + "\n")
-        corr_handle.flush()
+        if std_handle is not None:
+            std_handle.write("sample\tfeature\tvalue\n")
+            std_handle.flush()
+    elif correlation_output:
+        out_handle.write("sample\t" + "\t".join(feature_columns) + "\n")
+        out_handle.flush()
     else:
         out_handle.write("sample\tfit_residual\t" + "\t".join(columns) + "\n")
         out_handle.flush()
@@ -773,12 +795,16 @@ def deconv(args):
     nproc = getattr(args, "nproc", 1) or 1
 
     def process(samfile, sig):
-        nonlocal columns, corr_columns, std_columns, n_rows
+        nonlocal n_rows
         try:
-            if rankcorr:
+            if correlation_output:
                 ranks, correlations = rank_correlate(sig, ref)
-                _write_deconv_row(out_handle, samfile, ranks.to_dict(), columns)
-                _write_deconv_row(corr_handle, samfile, correlations.to_dict(), corr_columns)
+                cell_order = ranks.index if long_output else columns
+                values = {
+                    f"{cell}.{kind}": (ranks[cell] if kind == "rank" else correlations[cell])
+                    for cell in cell_order for kind in kinds
+                }
+                _write_deconv_row(out_handle, samfile, values, list(values), long=long_output)
                 n_rows += 1
                 return
 
@@ -793,9 +819,11 @@ def deconv(args):
             return
 
         residuals[samfile] = residual
-        _write_deconv_row(out_handle, samfile, fractions.to_dict(), columns, residual=residual)
+        cell_order = fractions.reindex(columns).sort_values(
+            ascending=False, kind="mergesort").index if long_output else columns
+        _write_deconv_row(out_handle, samfile, fractions.to_dict(), cell_order, residual=residual, long=long_output)
         if std_handle is not None and bootstrap_std is not None:
-            _write_deconv_row(std_handle, samfile, bootstrap_std.to_dict(), std_columns, residual=residual)
+            _write_deconv_row(std_handle, samfile, bootstrap_std.to_dict(), cell_order, residual=residual, long=long_output)
         n_rows += 1
 
     try:
@@ -812,17 +840,13 @@ def deconv(args):
     finally:
         if out_handle is not sys.stdout:
             out_handle.close()
-        if corr_handle is not None and corr_handle is not sys.stderr:
-            corr_handle.close()
         if std_handle is not None:
             std_handle.close()
 
     if n_rows == 0:
         raise RuntimeError("No samples could be deconvolved.")
 
-    if rankcorr and out == "-":
-        log.info("Correlation coefficients written to stderr.")
-    elif n_bootstrap > 0 and out == "-":
+    if not correlation_output and n_bootstrap > 0 and out == "-":
         log.info("Bootstrap std written to stderr only (use -O to write to file).")
 
     log.info("Wrote deconvolution results for %d sample(s).", n_rows)

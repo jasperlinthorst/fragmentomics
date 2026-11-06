@@ -257,11 +257,15 @@ cfstats fourier --leuven --wide --nproc 4 --bamlist bamlist.txt \
 ### `deconv` — Cell-type deconvolution
 
 Deconvolute fractional cell-type contributions from per-gene FFT-WPS profiles
-using a single-cell transcriptomic reference atlas (downloaded/cached under the
-hood, or supplied locally).
+using a single-cell transcriptomic reference atlas. The default is the bundled
+log2-transformed cellxgene Tabula Sapiens/trophoblast tissue matrix: 19,620 genes
+× 465 cell types, stored as float32 Parquet (~26.7 MiB). No download or cache is
+needed for this reference. Supply `--reference-atlas` for a local alternative,
+or `--atlas-url` to download, aggregate and cache an alternative `.h5ad` atlas.
+Explicit local references take precedence over `--atlas-url`.
 
 ```bash
-# Use the default Tabula Sapiens atlas (downloaded on first run)
+# Use the bundled log2 cellxgene Tabula Sapiens/trophoblast tissue reference
 cfstats deconv -r hg38.fa sample.cram
 
 # Local pre-built reference matrix (genes × cell types)
@@ -277,8 +281,8 @@ cfstats deconv -r hg38.fa --bootstrap 100 --output sample_deconv.tsv sample.cram
 | `-w` | Gene body window for FFT-WPS (bp) | 10000 |
 | `--amplitude-min` | Lower bound of nucleosome-spacing period band (bp) | 193 |
 | `--amplitude-max` | Upper bound of nucleosome-spacing period band (bp) | 199 |
-| `--reference-atlas` | Local `.h5ad` atlas or genes × cell-types matrix (.parquet/.tsv/.csv) | — |
-| `--atlas-url` | URL to download a single-cell atlas `.h5ad` | Tabula Sapiens |
+| `--reference-atlas` | Local `.h5ad` atlas or genes × cell-types matrix (.parquet/.tsv/.csv) | bundled log2 tissue matrix |
+| `--atlas-url` | URL to download an alternative single-cell atlas `.h5ad` | — |
 | `--cell-type-col` | `.obs` column holding cell-type labels | auto-detected |
 | `--min-cells` | Minimum cells for a cell type to be included | 10 |
 | `--chunk-size` | Cells per chunk when streaming a large `.h5ad` | 20000 |
@@ -288,15 +292,20 @@ cfstats deconv -r hg38.fa --bootstrap 100 --output sample_deconv.tsv sample.cram
 | `--bootstrap` | Gene-level bootstrap iterations for uncertainty | 0 |
 | `--amplitude-step` | Step between discrete period amplitudes (bp) | 1 (3 with `--leuven`/`--rankcorr`) |
 | `--leuven` | Leuven read selection, WPS scoring, strand orientation and spectral transform | off |
-| `--rankcorr` | Ranked-correlation output (Leuven/Kate method) instead of NNLS fractions; implies `--leuven` | off |
+| `--rank` | Cell-type ranks instead of NNLS fractions; implies `--leuven` | off |
+| `--corr` | Pearson coefficients instead of NNLS fractions; implies `--leuven` | off |
+| `--rankcorr` | Both ranks and coefficients in one output; equivalent to `--rank --corr` | off |
+| `--long` | One sample/feature/value row per feature; NNLS sorts by descending contribution, correlation modes by ascending correlation/rank | off |
 | `--output`, `-O` | Output TSV path (`-` for stdout) | `-` |
 
 With `--rankcorr`, each reference cell type is Pearson-correlated against the
 per-gene FFT-WPS signal (genes observed in both, i.e. R's
 `pairwise.complete.obs`) and cell types are ranked in ascending order of
 correlation: rank 1 is the most negatively correlated (strongest contributor,
-since FFT-WPS intensity decreases with expression). The output TSV holds ranks;
-raw coefficients are written to `<output>.correlations.tsv`. This replicates
+since FFT-WPS intensity decreases with expression). Ranks and coefficients are
+written to one output with `.rank` and `.corr` feature suffixes. Wide output
+preserves reference column order; `--long` sorts cell types by rank per sample.
+This replicates
 the `cellforigin_correlations.R` step of the Leuven pipeline exactly when the
 same genes × cell-types matrix is passed via `--reference-atlas`.
 

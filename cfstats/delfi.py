@@ -2,12 +2,14 @@ import pysam
 import sys
 import numpy as np
 
-from cfstats.utils import collect_bam_files
+from cfstats.utils import collect_bam_files, StatsWriter
 
 
 def delfi(args, cmdline=True):
 
     args.samfiles = collect_bam_files(args.samfiles, getattr(args, 'bamlist', None))
+
+    writer = StatsWriter(args) if cmdline else None
 
     for samfile in args.samfiles:
         cram=pysam.AlignmentFile(samfile,reference_filename=args.reference)
@@ -53,18 +55,13 @@ def delfi(args, cmdline=True):
                         elif (abs(read.query_length)>args.longlow and abs(read.query_length)<args.longup):
                             bins_long[read.reference_name][int(read.pos/args.binsize)]+=1
         
-        if args.header and samfile==args.samfiles[0]:
-            h=["filename"] if args.name else []
-            for ref in bins_short:
-                h+=[ref+'_delfi_'+str(x) for x in range(len(bins_short[ref]))]
-            sys.stdout.write("\t".join(h)+"\n")  
-        
+        labels=[]
+        for ref in bins_short:
+            labels+=[ref+'_delfi_'+str(x) for x in range(len(bins_short[ref]))]
+
         vshort,vlong=[],[]
         for ref in bins_short:
             vshort+=list(bins_short[ref])
             vlong+=list(bins_long[ref])
-        
-        if args.name:
-            sys.stdout.write(samfile+"\t")
-        
-        sys.stdout.write("\t".join( map(str,(np.array(vshort)+1)/(np.array(vlong)+1) ) ) +"\n")
+
+        writer.write(samfile, labels, (np.array(vshort)+1)/(np.array(vlong)+1))

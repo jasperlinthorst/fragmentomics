@@ -3,7 +3,7 @@ import sklearn
 import pickle
 import numpy as np
 from cfstats import bincounts
-from cfstats.utils import collect_bam_files
+from cfstats.utils import collect_bam_files, StatsWriter
 import sys
 import logging
 
@@ -84,6 +84,9 @@ def ff(args, cmdline=True):
         feats=tup[1]
 
     log.info("Binning read counts...")
+    # args.header is forced on above for internal feature selection; the ff
+    # output itself has never printed a header, so keep it that way.
+    writer = StatsWriter(args, header=False) if cmdline else None
     predictions = {}
     model_columns = None
     for columns, smp, counts in bincounts.iter_bincounts(args):
@@ -112,8 +115,7 @@ def ff(args, cmdline=True):
             )
         predictions[smp] = ffval
         if cmdline:
-            sys.stdout.write("%s\t%s\n"%(smp,ffval))
-            sys.stdout.flush()
+            writer.write(smp, ["FF"], [ffval])
 
     log.info("Binning done.")
     if not cmdline:

@@ -261,17 +261,30 @@ def siteprofile(args, cmdline=True):
         if not rows:
             return
         if cmdline:
-            for row in rows:
+            metrics = ("n_sites", "mean_coverage", "central_coverage", "amplitude")
+            if getattr(args, "long", False):
                 if not header_written:
-                    if not getattr(args, "name", True):
-                        row = {k: v for k, v in row.items() if k != "filename"}
-                    sys.stdout.write("\t".join(row.keys()) + "\n")
+                    cols = ["site_list", "feature", "value"]
+                    if getattr(args, "name", True):
+                        cols.insert(0, "filename")
+                    sys.stdout.write("\t".join(cols) + "\n")
                     sys.stdout.flush()
                     header_written = True
-                if not getattr(args, "name", True):
-                    row = {k: v for k, v in row.items() if k != "filename"}
-                sys.stdout.write("\t".join(str(v) for v in row.values()) + "\n")
-                sys.stdout.flush()
+                for row in rows:
+                    prefix = (row["filename"] + "\t") if getattr(args, "name", True) else ""
+                    for metric in metrics:
+                        sys.stdout.write(f"{prefix}{row['site_list']}\t{metric}\t{row[metric]}\n")
+                    sys.stdout.flush()
+            else:
+                for row in rows:
+                    if not getattr(args, "name", True):
+                        row = {k: v for k, v in row.items() if k != "filename"}
+                    if not header_written:
+                        sys.stdout.write("\t".join(row.keys()) + "\n")
+                        sys.stdout.flush()
+                        header_written = True
+                    sys.stdout.write("\t".join(str(v) for v in row.values()) + "\n")
+                    sys.stdout.flush()
         else:
             all_rows.extend(rows)
 

@@ -54,12 +54,7 @@ def fszd(args, cmdline=True):
     utils.require_sample_names(args)
 
     V={}
-
-    if cmdline and args.header:
-        if args.name:
-            sys.stdout.write("filename\t")
-        sys.stdout.write("\t".join(map(str, range(args.lower, args.upper))) + "\n")
-        sys.stdout.flush()
+    writer = utils.StatsWriter(args) if cmdline else None
 
     def _iter_results():
         payload = zip(args.samfiles, [args]*len(args.samfiles))
@@ -87,10 +82,7 @@ def fszd(args, cmdline=True):
             V[samfile] = v
             continue
 
-        if args.name:
-            sys.stdout.write(samfile + "\t")
-        sys.stdout.write("\t".join(map(str, v)) + "\n")
-        sys.stdout.flush()
+        writer.write(samfile, range(args.lower, args.upper), v)
 
     if not cmdline:
         # Preserve input order for programmatic callers.
