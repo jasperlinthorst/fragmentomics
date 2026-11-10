@@ -258,14 +258,17 @@ cfstats fourier --leuven --wide --nproc 4 --bamlist bamlist.txt \
 
 Deconvolute fractional cell-type contributions from per-gene FFT-WPS profiles
 using a single-cell transcriptomic reference atlas. The default is the bundled
-log2-transformed cellxgene Tabula Sapiens/trophoblast tissue matrix: 19,620 genes
-× 465 cell types, stored as float32 Parquet (~26.7 MiB). No download or cache is
-needed for this reference. Supply `--reference-atlas` for a local alternative,
-or `--atlas-url` to download, aggregate and cache an alternative `.h5ad` atlas.
+log2-transformed cellxgene Tabula Sapiens/trophoblast broad-cell-type matrix:
+19,620 genes × 171 cell types, stored as float32 Parquet (~9.8 MiB). No download
+or cache is needed for this reference. The tissue-stratified matrix (465 cell
+types, ~26.7 MiB) is also bundled in `cfstats/reference/` as
+`cellxgene_tabsap_trophoblasts_tissues.log2.parquet` and can be selected with
+`--reference-atlas`. Supply that option for any local alternative, or
+`--atlas-url` to download, aggregate and cache an alternative `.h5ad` atlas.
 Explicit local references take precedence over `--atlas-url`.
 
 ```bash
-# Use the bundled log2 cellxgene Tabula Sapiens/trophoblast tissue reference
+# Use the bundled log2 cellxgene Tabula Sapiens/trophoblast broad-cell-type reference
 cfstats deconv -r hg38.fa sample.cram
 
 # Local pre-built reference matrix (genes × cell types)
@@ -281,7 +284,7 @@ cfstats deconv -r hg38.fa --bootstrap 100 --output sample_deconv.tsv sample.cram
 | `-w` | Gene body window for FFT-WPS (bp) | 10000 |
 | `--amplitude-min` | Lower bound of nucleosome-spacing period band (bp) | 193 |
 | `--amplitude-max` | Upper bound of nucleosome-spacing period band (bp) | 199 |
-| `--reference-atlas` | Local `.h5ad` atlas or genes × cell-types matrix (.parquet/.tsv/.csv) | bundled log2 tissue matrix |
+| `--reference-atlas` | Local `.h5ad` atlas or genes × cell-types matrix (.parquet/.tsv/.csv) | bundled log2 broad-cell-type matrix |
 | `--atlas-url` | URL to download an alternative single-cell atlas `.h5ad` | — |
 | `--cell-type-col` | `.obs` column holding cell-type labels | auto-detected |
 | `--min-cells` | Minimum cells for a cell type to be included | 10 |

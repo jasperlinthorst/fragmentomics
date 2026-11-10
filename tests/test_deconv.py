@@ -38,19 +38,32 @@ class TestFftWpsIntensity:
 # ---------------------------------------------------------------------------
 
 class TestReferenceLoading:
-    def test_default_uses_packaged_tissue_matrix_without_cache(self, monkeypatch):
+    def test_default_uses_packaged_broad_matrix_without_cache(self, monkeypatch):
         from types import SimpleNamespace
         from cfstats import deconv
 
         monkeypatch.setattr(deconv, '_cache_dir', lambda: pytest.fail('Default must not need a cache'))
         monkeypatch.setattr(deconv, '_download', lambda *args: pytest.fail('Default must not download'))
         ref = deconv.load_reference(SimpleNamespace())
-        assert ref.shape == (19620, 465)
+        assert ref.shape == (19620, 171)
+        assert deconv.DEFAULT_REFERENCE_ATLAS.endswith('cellxgene_tabsap_trophoblasts_broad_celltypes.log2.parquet')
         assert all(dtype == np.dtype('float32') for dtype in ref.dtypes)
         assert all(' ' not in name for name in ref.columns)
         assert np.isfinite(ref.to_numpy()).all()
         assert (ref.to_numpy() < 0).all()
-        assert ref.columns[0] == 'placenta.VCT'
+        assert ref.columns[0] == 'VCT'
+
+    def test_packaged_tissue_matrix_remains_available(self, monkeypatch):
+        from types import SimpleNamespace
+        from pathlib import Path
+        from cfstats import deconv
+
+        path = Path(deconv.DEFAULT_REFERENCE_ATLAS).with_name(
+            'cellxgene_tabsap_trophoblasts_tissues.log2.parquet')
+        monkeypatch.setattr(deconv, '_cache_dir', lambda: pytest.fail('Prebuilt matrix must not need a cache'))
+        ref = deconv.load_reference(SimpleNamespace(reference_atlas=str(path)))
+        assert ref.shape == (19620, 465)
+        assert all(dtype == np.dtype('float32') for dtype in ref.dtypes)
 
     def test_explicit_matrix_overrides_default_and_url(self, tmp_path, monkeypatch):
         from types import SimpleNamespace

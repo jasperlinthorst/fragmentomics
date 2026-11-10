@@ -46,7 +46,8 @@ setup(
     include_package_data=False,
     package_data={
         'cfstats': ['assets/Ensemble_canonical_GRCh38.body.tsv',
-                    'reference/cellxgene_tabsap_trophoblasts_tissues.log2.parquet'],
+                    'reference/cellxgene_tabsap_trophoblasts_tissues.log2.parquet',
+                    'reference/cellxgene_tabsap_trophoblasts_broad_celltypes.log2.parquet'],
         'cfstats.models': ['LICENSE', '*.joblib', '*.pickle'],
     },
     install_requires=[

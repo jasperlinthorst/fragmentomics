@@ -14,7 +14,7 @@ fragmentation profiles reveal disease biology*):
   contribution of each cell type to the cfDNA pool.
 
 The default reference is the bundled log2-transformed cellxgene Tabula Sapiens
-and trophoblast tissue matrix. Any local ``.h5ad`` / pre-built matrix can be
+and trophoblast broad-cell-type matrix. Any local ``.h5ad`` / pre-built matrix can be
 supplied via ``--reference-atlas``. An explicit ``--atlas-url`` downloads an
 alternative single-cell atlas and caches its pseudobulk matrix under
 ``~/.cache/cfstats/deconv/``.
@@ -40,7 +40,7 @@ log = logging.getLogger("cfstats.deconv")
 
 DEFAULT_REFERENCE_ATLAS = os.path.join(
     os.path.dirname(__file__), "reference",
-    "cellxgene_tabsap_trophoblasts_tissues.log2.parquet")
+    "cellxgene_tabsap_trophoblasts_broad_celltypes.log2.parquet")
 
 # Tabula Sapiens dataset used in the exploratory notebooks (cellxgene). The
 # download URL is only a *default*; the user can override it with --atlas-url or
@@ -311,7 +311,7 @@ def load_reference(args):
     Resolution order:
       1. ``--reference-atlas`` local path (.h5ad or pre-built matrix).
       2. Explicit ``--atlas-url``: download, aggregate and cache the atlas.
-      3. Bundled log2-transformed float32 tissue reference (no download/cache).
+      3. Bundled log2-transformed float32 broad-cell-type reference (no download/cache).
     """
     ref_arg = getattr(args, "reference_atlas", None)
     cell_type_col = getattr(args, "cell_type_col", None)
